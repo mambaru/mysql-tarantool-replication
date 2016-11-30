@@ -3,10 +3,7 @@
 #include <sstream>
 #include <fstream>
 #include <signal.h>
-#include <lib/tp.1.5.h>
-#include <lib/session.h>
 
-#include <boost/bind.hpp>
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 
@@ -22,6 +19,7 @@
 #include "remotemon.h"
 
 // =========
+using std::placeholders::_1;
 
 namespace replicator {
 
@@ -189,29 +187,18 @@ static void tpwrite_run(void *ZMQTpSocket)
 
 			send_zmq_event(ZMQTpSocket, ev_connect);
 
-			while(true) {
-				if (is_term || !connected) {
-					break;
-				}
-
-				connected = poll_zmq_event(ZMQTpSocket, 100, boost::bind(&TPWriter::BinlogEventCallback, boost::ref(*tpwriter), _1)) == false;
+			while (!is_term && connected) {
+				connected = poll_zmq_event(ZMQTpSocket, 100, std::bind(&TPWriter::BinlogEventCallback, tpwriter, _1)) == false;
 				if (connected) {
 					connected = tpwriter->Sync();
 				}
-
-				while (!is_term && connected) {
-					int r = tpwriter->ReadReply();
-					if (r == 0) {
-						break;
-					}
-					if (r < 0) {
-						connected = false;
-						break;
-					}
-					int code = tpwriter->GetReplyCode();
-					if (code) {
-						std::cerr << "Tarantool eror: " << tpwriter->GetReplyErrorMessage() << " (code: " << code << ")" << std::endl;
-						connected = !tpwriter->DisconnectOnError();
+				if (!is_term && connected) {
+					if (tpwriter->ReadReply() < 0) {
+						const uint64_t code = tpwriter->GetReplyCode();
+						if (code) {
+							std::cerr << "Tarantool eror: " << tpwriter->GetReplyErrorMessage() << " (code: " << code << ")" << std::endl;
+							connected = !tpwriter->DisconnectOnError();
+						}
 					}
 				}
 			}
@@ -280,7 +267,7 @@ static void update_stats()
 	}
 
 	ping_watchdog();
-
+/*
 	now = ::time(NULL);
 
 	seconds_behind_master = dbreader->GetSecondsBehindMaster();
@@ -299,7 +286,7 @@ static void update_stats()
 			graphite->SendStat("zmq_allocs_total_max", max_zalloc_count);
 			max_zalloc_count = zalloc_count;
 		}
-	}
+	} // */
 }
 
 // ====================
@@ -353,8 +340,8 @@ static bool tpread_zmq_callback(const SerializableBinlogEvent &ev, std::string &
 static bool tpread_get_binlogpos(unsigned timeout, std::string &TpBinlogName, unsigned long &TpBinlogPos, bool &disconnect)
 {
 	bool read = false;
-	poll_zmq_event(ZMQTpSocket, timeout, boost::bind(tpread_zmq_callback, _1, boost::ref(TpBinlogName), boost::ref(TpBinlogPos), 
-		boost::ref(disconnect), boost::ref(read))); 
+	poll_zmq_event(ZMQTpSocket, timeout, std::bind(tpread_zmq_callback, _1, std::ref(TpBinlogName), std::ref(TpBinlogPos),
+		std::ref(disconnect), std::ref(read)));
 	return read;
 }
 
@@ -391,8 +378,13 @@ static void init(libconfig::Config &cfg)
 			mysql.lookupValue("connect_retry", connect_retry);
 			mysql.lookupValue("watchdog_timeout", watchdog_timeout);
 
-			dbreader = new DBReader((const char *)mysql["host"], (const char *)mysql["user"], (const char *)mysql["password"], 
-				port, connect_retry);
+			nanomysql::mysql_conn_opts opts;
+			opts.mysql_host = (const char*)mysql["host"];
+			opts.mysql_port = port;
+			opts.mysql_user = (const char*)mysql["user"];
+			opts.mysql_pass = (const char*)mysql["password"];
+
+			dbreader = new DBReader(opts, connect_retry);
 		}
 
 		// read Tarantool config
@@ -400,19 +392,25 @@ static void init(libconfig::Config &cfg)
 			const libconfig::Setting &tarantool = root["tarantool"];
 
 			std::string user(""), password("");
-			unsigned port = 33013;
 			unsigned connect_retry = 15;
 			unsigned sync_retry = 1000;
 			bool disconnect_on_error = false;
 			tarantool.lookupValue("user", user);
 			tarantool.lookupValue("password", password);
-			tarantool.lookupValue("port", port);
 			tarantool.lookupValue("connect_retry", connect_retry);
 			tarantool.lookupValue("sync_retry", sync_retry);
 			tarantool.lookupValue("disconnect_on_error", disconnect_on_error);
 
-			tpwriter = new TPWriter((const char *)tarantool["host"], user, password, (unsigned)tarantool["binlog_pos_space"],
-				(unsigned)tarantool["binlog_pos_key"], port, connect_retry, sync_retry, disconnect_on_error);
+			tpwriter = new TPWriter(
+				(const char *)tarantool["host"],
+				user,
+				password,
+				(uint32_t)tarantool["binlog_pos_space"],
+				(uint32_t)tarantool["binlog_pos_key"],
+				connect_retry,
+				sync_retry,
+				disconnect_on_error
+			);
 		}
 
 		// read Mysql to Tarantool mappings (each table maps to a single Tarantool space)
@@ -428,33 +426,27 @@ static void init(libconfig::Config &cfg)
 				std::string update_call = TPWriter::empty_call;
 				std::string delete_call = TPWriter::empty_call;
 				unsigned space((unsigned)mapping["space"]);
-				std::vector<std::string> columns;
-				TPWriter::Tuple tuple, keys;
+				std::map<std::string, unsigned> columns;
+				TPWriter::Tuple keys;
+				unsigned index_max = tpwriter->space_last_id[space];
 
+				// read key tarantool fields we'll use for delete requests
+				{
+					const libconfig::Setting &keys_ = mapping["key_fields"];
+					for (int i = 0; i < keys_.getLength(); i++) {
+						unsigned key = keys_[i];
+						index_max = std::max(index_max, key);
+						keys.push_back(key);
+					}
+				}
 				// read columns tuple
 				{
 					const libconfig::Setting &columns_ = mapping["columns"];
-					int count = columns_.getLength();
-					for (int i = 0; i < count; i++) {
-						columns.push_back((const char *)columns_[i]);
-						tuple.push_back(i);
+					for (int i = 0; i < columns_.getLength(); i++) {
+						unsigned index = i < keys.size() ? keys[i] : ++index_max;
+						columns[ (const char *)columns_[i] ] = index;
 					}
 				}
-
-				// read key Tarantool fields we'll use for DELETE requests
-				{
-					const libconfig::Setting &keys_ = mapping["key_fields"];
-					int count = keys_.getLength();
-					for (int i = 0; i < count; i++) {
-						unsigned k = keys_[i];
-						if (k >= columns.size()) {
-							std::cerr << "Bad key field id: " << k << " (should be less than " << columns.size() << ")" << std::endl;
-							exit(EXIT_FAILURE);
-						}
-						keys.push_back(k);
-					}
-				}
-
 				// lookup LUA procedures we can call instead of issuing DML requests
 				{
 					mapping.lookupValue("insert_call", insert_call);
@@ -462,41 +454,12 @@ static void init(libconfig::Config &cfg)
 					mapping.lookupValue("delete_call", delete_call);
 				}
 
-				if (mapping.exists("simple_filter"))
-				{
-					const libconfig::Setting &columns = mapping["columns"];
-					const libconfig::Setting &simple_filter = mapping["simple_filter"];
-					const std::string column((const char *)simple_filter["column"]);
+				bool do_dump = true;
+				mapping.lookupValue("dump", do_dump);
 
-					bool negate;
-					simple_filter.lookupValue("negate", negate);
-
-					std::vector<int64_t> values;
-
-					const libconfig::Setting &values_ = simple_filter["values"];
-					for (int i = 0; i < values_.getLength(); i++) {
-						values.push_back((long long)values_[i]);
-					}
-
-					unsigned column_num = columns.getLength();
-					for (int i = 0; i < columns.getLength(); i++) {
-						if (column == (const char *)columns[i]) {
-							column_num = i;
-							break;
-						}
-					}
-
-					if (column_num == columns.getLength()) {
-						std::cerr << "Bad filter field: " << column << std::endl;
-						exit(EXIT_FAILURE);
-					}
-
-					SimplePredicate pred(column_num, negate, values);
-					dbreader->AddFilterPredicate(database, table, pred);
-				}
-
-				dbreader->AddTable(database, table, columns);
-				tpwriter->AddTable(database, table, space, tuple, keys, insert_call, update_call, delete_call);
+				dbreader->AddTable(database, table, columns, do_dump);
+				tpwriter->AddTable(database, table, space, keys, insert_call, update_call, delete_call);
+				tpwriter->space_last_id[space] = index_max;
 			}
 		}
 
@@ -548,8 +511,8 @@ static void main_loop()
 		}
 
 		try {
-			BinlogEventCallback cb = boost::bind(dbread_callback, _1,
-				boost::ref(TpBinlogName), boost::ref(TpBinlogPos), boost::ref(disconnected));
+			BinlogEventCallback cb = std::bind(dbread_callback, _1,
+				std::ref(TpBinlogName), std::ref(TpBinlogPos), std::ref(disconnected));
 
 			if (TpBinlogName == "" && TpBinlogPos == 0) {
 				std::cout << "Tarantool reported null binlog position. Dumping tables..." << std::endl;

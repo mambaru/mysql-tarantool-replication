@@ -1,12 +1,12 @@
 #include <sstream>
-#include <boost/bind.hpp>
-#include <boost/ref.hpp>
 #include <boost/any.hpp>
-#include <boost/function.hpp>
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/text_oarchive.hpp>
-#include <lib/tp.1.5.h>
-#include <lib/session.h>
+
+#include <tarantool/tarantool.h>
+#include <tarantool/tnt_net.h>
+#include <tarantool/tnt_opt.h>
+#include <msgpuck.h>
 
 #include <zmq.h>
 #include <zmq_utils.h>
@@ -20,17 +20,48 @@ namespace replicator {
 
 const std::string TPWriter::empty_call("");
 
-TPWriter::TPWriter(const std::string &host, const std::string &user, const std::string &password, 
-	uint32_t binlog_key_space, uint32_t binlog_key, unsigned int port, unsigned connect_retry, unsigned sync_retry,
-	bool disconnect_on_error) :
-host(host), user(user), password(password), binlog_key_space(binlog_key_space), binlog_key(binlog_key),
-binlog_name(""), binlog_pos(0), seconds_behind_master(0), last_unix_timestamp(0),
-port(port), connect_retry(connect_retry), sync_retry(sync_retry),
-next_connect_attempt(0), next_sync_attempt(0), next_ping_attempt(0),
-last_synced_binlog_name(""), last_synced_binlog_pos(0), disconnect_on_error(disconnect_on_error),
-reply_bytes(0), reply_server_code(0), reply_error_msg("")
+TPWriter::TPWriter(
+	const std::string &host,
+	const std::string &user,
+	const std::string &password,
+	uint32_t binlog_key_space,
+	uint32_t binlog_key,
+	unsigned connect_retry,
+	unsigned sync_retry,
+	bool disconnect_on_error
+) :
+	host(host),
+	user(user),
+	password(password),
+	binlog_key_space(binlog_key_space),
+	binlog_key(binlog_key),
+	binlog_name(""),
+	binlog_pos(0),
+	seconds_behind_master(0),
+	connect_retry(connect_retry),
+	sync_retry(sync_retry),
+	next_connect_attempt(0),
+	next_sync_attempt(0),
+	next_ping_attempt(0),
+	disconnect_on_error(disconnect_on_error),
+	reply_server_code(0),
+	reply_error_msg("")
 {
+	::tnt_net(&sess);
 
+	::tnt_set(&sess, ::TNT_OPT_URI, host.c_str());
+	::tnt_set(&sess, ::TNT_OPT_SEND_BUF, 0);
+	::tnt_set(&sess, ::TNT_OPT_RECV_BUF, 16 * 1024 * 1024);
+
+	::timeval tmout;
+	auto make_timeout = [&tmout] (const unsigned t) -> ::timeval* {
+		tmout.tv_sec  =  t / 1000;
+		tmout.tv_usec = (t % 1000) * 1000;
+		return &tmout;
+	};
+
+	::tnt_set(&sess, ::TNT_OPT_TMOUT_RECV, make_timeout(100));
+	::tnt_set(&sess, ::TNT_OPT_TMOUT_SEND, make_timeout(10000));
 }
 
 bool TPWriter::Connect()
@@ -40,27 +71,14 @@ bool TPWriter::Connect()
 		::sleep(1);
 		return false;
 	}
-
-	::tbses *s = &sess;
-	::tb_sesinit(s);
-	::tb_sesset(s, TB_HOST, host.c_str());
-	::tb_sesset(s, TB_PORT, port);
-	::tb_sesset(s, TB_SENDBUF, TPWriter::SND_BUFSIZE);
-	::tb_sesset(s, TB_READBUF, 0);
-	::tb_sesset(s, TB_RECVTM, 10);
-	::tb_sesset(s, TB_SENDTM, 10000);
-	::tb_sesset(s, TB_NOBLOCK, 1);
-
-	int rc = ::tb_sesconnect(s);
-	if (rc == -1)
-	{
-		std::cout << "Could not connect to Tarantool" << std::endl;
-		::tb_sesfree(&sess);
+	if (::tnt_connect(&sess) < 0) {
+		std::cout << "Could not connect to Tarantool: " << ::tnt_strerror(&sess) << std::endl;
+		::tnt_close(&sess);
 		next_connect_attempt = ::time(NULL) + connect_retry;
 		return false;
 	}
 
-	std::cout << "Connected to Tarantool at " << host << ":" << port << std::endl;
+	std::cout << "Connected to Tarantool at " << host << std::endl;
 	next_sync_attempt = 0;
 
 	return true;
@@ -68,351 +86,382 @@ bool TPWriter::Connect()
 
 TPWriter::~TPWriter()
 {
-	::tb_sesfree(&sess);
+	::tnt_stream_free(&sess);
 }
 
 bool TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos)
 {
-	::tbses *s = &sess;
-
 	// read initial binlog pos
-	char buf[256];
+	int64_t sync;
+	{
+		__tnt_object key;
+		::tnt_object_add_array(&key, 1);
+		::tnt_object_add_uint(&key, binlog_key);
+		::tnt_object_container_close(&key);
 
-	::tp req;
-	::tp_init(&req, buf, sizeof(buf), NULL, NULL);
-	::tp_select(&req, binlog_key_space, 0, 0, 1);
-	::tp_tuple(&req);
-	::tp_field(&req, (const char *)&binlog_key, sizeof(binlog_key));
-	Send(buf, ::tp_used(&req));
-	Sync();
+		__tnt_request req;
+		::tnt_request_select(&req);
+		::tnt_request_set_space(&req, binlog_key_space);
+		::tnt_request_set_limit(&req, 1);
+		::tnt_request_set_key(&req, &key);
 
-	int64_t r = 0;
-	while ((r = ReadReply()) == 0) { ::usleep(5000); }
+		sync = Send(&req);
+	}
 
-	if (r < 0) {
-		std::cout << "Reading binlog position from Tarantool failed (errno: " << s->errno_ << ")" << std::endl;
-		next_connect_attempt = ::time(NULL) + connect_retry;
+	__tnt_reply re;
+	do {
+		const int r = Recv(&re);
+		if (r == 0) {
+			break;
+		}
+		else if (r < 0 && reply_server_code) {
+			std::cerr << "ReadBinlogPos Tarantool eror: " << reply_error_msg << " (code: " << reply_server_code << ")" << std::endl;
+			return false;
+		}
+		else {
+			std::cerr << "ReadBinlogPos error: no replies, weird" << std::endl;
+			return false;
+		}
+	} while (true);
+
+	if ((&re)->sync != sync) {
+		std::cerr << "ReadBinlogPos error: not requested reply" << std::endl;
 		return false;
 	}
 
-	if (reply_server_code) {
-		std::cout << "Reading binlog position from Tarantool failed: " << reply_error_msg << std::endl;
-		next_connect_attempt = ::time(NULL) + connect_retry;
-		return false;
-	}
+	do {
+		const char *data = (&re)->data;
 
-	next_ping_attempt = Milliseconds() + TPWriter::PING_TIMEOUT;
+		// result rows
+		if (mp_unlikely(mp_typeof(*data) != MP_ARRAY)) break;
+		if (mp_unlikely(mp_decode_array(&data) == 0)) {
+			// no binlog created yet
+			this->binlog_name = binlog_name = "";
+			this->binlog_pos = binlog_pos = 0;
+			return true;
+		}
 
-	// send initial binlog position to the main thread
-	SerializableBinlogEvent ev;
-	if (::tp_next(&reply) <= 0 || ::tp_tuplecount(&reply) < 3) {
-		binlog_name = "";
-		binlog_pos = 0;
-		this->binlog_name = "";
-		this->binlog_pos = 0;
+		// row
+		if (mp_unlikely(mp_typeof(*data) != MP_ARRAY)) break;
+		if (mp_unlikely(mp_decode_array(&data) != 3)) break;
+
+		// binlog_key
+		if (mp_unlikely(mp_typeof(*data) != MP_UINT)) break;
+		if (mp_unlikely(mp_decode_uint(&data) != binlog_key)) break;;
+
+		if (mp_unlikely(mp_typeof(*data) != MP_STR)) break;
+		uint32_t _binlog_name_len;
+		const char *_binlog_name = mp_decode_str(&data, &_binlog_name_len);
+
+		if (mp_unlikely(mp_typeof(*data) != MP_UINT)) break;
+		uint64_t _binlog_pos = mp_decode_uint(&data);
+
+		this->binlog_name = binlog_name = std::string(_binlog_name, _binlog_name_len);
+		this->binlog_pos = binlog_pos = _binlog_pos;
+
+		next_ping_attempt = Milliseconds() + TPWriter::PING_TIMEOUT;
+
 		return true;
-	}
+	} while (0);
 
-	std::string tmp;
-
-	::tp_nextfield(&reply);
-
-	::tp_nextfield(&reply);
-	tmp = "";
-	tmp.append(::tp_getfield(&reply), ::tp_getfieldsize(&reply));
-	binlog_name = tmp;
-
-	::tp_nextfield(&reply);
-	tmp = "";
-	tmp.append(::tp_getfield(&reply), ::tp_getfieldsize(&reply));
-	std::istringstream iss(tmp);
-	iss >> binlog_pos;
-
-	if (::tp_nextfield(&reply)) {
-		tmp = "";
-		tmp.append(::tp_getfield(&reply), ::tp_getfieldsize(&reply));
-		std::istringstream iss(tmp);
-		iss >> this->seconds_behind_master;
-	}
-
-	this->binlog_name = binlog_name;
-	this->binlog_pos = binlog_pos;
-	this->last_unix_timestamp = time(NULL);
-
+	std::cerr << "binlog record format error" << std::endl;
+	this->binlog_name = binlog_name = "";
+	this->binlog_pos = binlog_pos = 0;
 	return true;
 }
 
 void TPWriter::Disconnect()
 {
-	::tb_sesfree(&sess);
+	::tnt_close(&sess);
 }
 
-void TPWriter::Ping()
+inline void TPWriter::Ping()
 {
-	char buf[100];
-	::tp req;
-	::tp_init(&req, buf, sizeof(buf), NULL, NULL);
-	::tp_ping(&req);
-	Send(buf, ::tp_used(&req));
+	__tnt_request req;
+	::tnt_request_ping(&req);
+	Send(&req);
 }
 
-void TPWriter::AddTable(const std::string &db, const std::string &table, unsigned space, const Tuple &tuple, const Tuple &keys,
-	const std::string &insert_call, const std::string &update_call, const std::string &delete_call)
-{
+void TPWriter::AddTable(
+	const std::string &db,
+	const std::string &table,
+	const unsigned space,
+	const Tuple &keys,
+	const std::string &insert_call,
+	const std::string &update_call,
+	const std::string &delete_call
+) {
 	TableMap &d = dbs[db];
 	TableSpace &s = d[table];
 	s.space = space;
-	s.tuple = tuple;
 	s.keys = keys;
 	s.insert_call = insert_call;
 	s.update_call = update_call;
 	s.delete_call = delete_call;
 }
 
-void TPWriter::SaveBinlogPos()
+inline void TPWriter::SaveBinlogPos()
 {
-	char buf[1024];
-	std::ostringstream oss1, oss2, oss3;
+	__tnt_object tuple;
+	::tnt_object_add_array(&tuple, 3);
+	::tnt_object_add_uint(&tuple, binlog_key);
+	::tnt_object_add_str(&tuple, binlog_name.c_str(), binlog_name.length());
+	::tnt_object_add_uint(&tuple, binlog_pos);
+	::tnt_object_container_close(&tuple);
 
-	if (last_synced_binlog_name == binlog_name && last_synced_binlog_pos == binlog_pos) {
-		return;
-	}
+	__tnt_request req;
+	::tnt_request_replace(&req);
+	::tnt_request_set_space(&req, binlog_key_space);
+	::tnt_request_set_tuple(&req, &tuple);
 
-	// query
-	::tp req;
-	::tp_init(&req, buf, sizeof(buf), NULL, NULL);
-	::tp_insert(&req, binlog_key_space, 0);
-	::tp_tuple(&req);
-	::tp_field(&req, (const char *)&binlog_key, sizeof(binlog_key));
-	::tp_field(&req, binlog_name.c_str(), binlog_name.length());
-
-	oss1 << binlog_pos;
-	::tp_field(&req, oss1.str().c_str(), oss1.str().length());
-
-	oss2 << seconds_behind_master;
-	::tp_field(&req, oss2.str().c_str(), oss2.str().length());
-
-	oss3 << last_unix_timestamp;
-	::tp_field(&req, oss3.str().c_str(), oss3.str().length());
-	Send(buf, ::tp_used(&req));
-
-	last_synced_binlog_name = binlog_name;
-	last_synced_binlog_pos = binlog_pos;
+	Send(&req);
 }
 
 bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 {
-	char buf[TPWriter::SND_BUFSIZE];
-	::tp req;
-
 	// spacial case event "IGNORE", which only updates binlog position
 	// but doesn't modify any table data
+	if (ev.event == "IGNORE")
+		return false;
 
-	DBMap::const_iterator i = dbs.find(ev.database);
-	if (ev.event != "IGNORE" && i != dbs.end()) {
-		const TableMap &d = i->second;
-		TableMap::const_iterator j = d.find(ev.table);
-		if (j != d.end()) {
-			const TableSpace &s = j->second;
-			const Tuple &t = ev.event == "DELETE" ? s.keys : s.tuple;
+	const auto idb = dbs.find(ev.database);
+	if (idb == dbs.end())
+		return false;
 
-			// add Tarantool request
-			::tp_init(&req, buf, sizeof(buf), NULL, NULL);
-			if (ev.event == "DELETE") {
-				if (s.delete_call.empty()) {
-					::tp_delete(&req, s.space, 0);
-				}
-				else {
-					::tp_call(&req, 0, s.delete_call.c_str(), s.delete_call.length());
-				}
-			} else if (ev.event == "INSERT") {
-				if (s.insert_call.empty()) {
-					::tp_insert(&req, s.space, 0);
-				}
-				else {
-					::tp_call(&req, 0, s.insert_call.c_str(), s.insert_call.length());
-				}
-			} else if (ev.event == "UPDATE") {
-				if (s.update_call.empty()) {
-					::tp_insert(&req, s.space, 0);
-				}
-				else {
-					::tp_call(&req, 0, s.update_call.c_str(), s.update_call.length());
-				}
-			} else {
-				throw std::range_error("Uknown binlog event: " + ev.event);
-				return false;
-			}
+	const TableMap &tm = idb->second;
+	const auto itm = tm.find(ev.table);
+	if (itm == tm.end())
+		return false;
 
-			::tp_tuple(&req);
+	const TableSpace &ts = itm->second;
 
-			for (Tuple::const_iterator it = t.begin(); it != t.end(); ++it) {
-				unsigned col = *it;
-				const SerializableValue &v = ev.row[col];
-				const boost::any &a = *v;
+	auto add_value = [] (struct ::tnt_stream *o, const SerializableValue &v) -> void {
+		try {
+			if (v.get_type_id() == "string") {
 				const std::string &vs = v.value_string();
-
-				try {
-					if (a.type() == typeid(int)) {
-						int32_t ival = boost::any_cast<int>(a);
-						::tp_field(&req, (const char *)&ival, sizeof(ival));
-					} else if (a.type() == typeid(unsigned int)) {
-						uint32_t ival = boost::any_cast<unsigned int>(a);
-						::tp_field(&req, (const char *)&ival, sizeof(ival));
-					} else if (a.type() == typeid(long long)) {
-						int64_t ival = int64_t(boost::any_cast<long long>(a));
-						::tp_field(&req, (const char *)&ival, sizeof(ival));
-					} else if (a.type() == typeid(unsigned long long)) {
-						uint64_t ival = uint64_t(boost::any_cast<unsigned long long>(a));
-						::tp_field(&req, (const char *)&ival, sizeof(ival));
-					} else 	if (a.type() == typeid(long)) {
-						uint32_t ival = uint32_t(boost::any_cast<long>(a));
-						::tp_field(&req, (const char *)&ival, sizeof(ival));
-					} else if (a.type() == typeid(float) || a.type() == typeid(double)) {
-						union {
-							uint32_t i;
-							float f;
-						} uiv;
-						uiv.f = a.type() == typeid(float) ? boost::any_cast<float>(a) : float(boost::any_cast<double>(a));
-						::tp_field(&req, (const char *)&uiv.i, sizeof(uiv.i));
-					}
-					else if (a.type() == typeid(void)) {
-						::tp_field(&req, "", 0);
-					}
-					else {
-						::tp_field(&req, vs.c_str(), vs.length());
-					}
-				}
-				catch (boost::bad_any_cast &ex) {
-					throw std::range_error(std::string("Typecasting error for column: ") + ex.what());
-					return true;
-				}
+				::tnt_object_add_str(o, vs.c_str(), vs.length());
+			} else if (v.get_type_id() == "int") {
+				::tnt_object_add_int(o, boost::any_cast<long long>(*v));
+			} else if (v.get_type_id() == "uint") {
+				::tnt_object_add_uint(o, boost::any_cast<unsigned long long>(*v));
+			} else if (v.get_type_id() == "float") {
+				::tnt_object_add_float(o, boost::any_cast<float>(*v));
+			} else if (v.get_type_id() == "double") {
+				::tnt_object_add_double(o, boost::any_cast<double>(*v));
+			} else {
+				::tnt_object_add_nil(o);
 			}
-
-			Send(buf, ::tp_used(&req));
 		}
+		catch (boost::bad_any_cast &ex) {
+			throw std::range_error(std::string("Typecasting error for column: ") + ex.what());
+		}
+	};
+
+	auto add_key = [&] (struct ::tnt_stream *o) -> void {
+		::tnt_object_add_array(o, ts.keys.size());
+		for (const auto i : ts.keys) {
+			add_value(o, ev.row.at(i));
+		}
+		::tnt_object_container_close(o);
+	};
+
+	auto add_tuple = [&] (struct ::tnt_stream *o) -> void {
+		::tnt_object_add_array(o, space_last_id[ts.space] + 1);
+		unsigned i_nil = 0;
+		// ev.row may have gaps, since it's not an array but a map
+		// so fill the gaps to match columns count
+		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
+			// fill gaps
+			for (; i_nil < it->first; ++i_nil) ::tnt_object_add_nil(o);
+
+			add_value(o, it->second);
+			i_nil = it->first + 1;
+		}
+		// fill gaps
+		for (; i_nil <= space_last_id[ts.space]; ++i_nil) ::tnt_object_add_nil(o);
+
+		::tnt_object_container_close(o);
+	};
+
+	auto add_ops = [&] (struct ::tnt_stream *o) -> void {
+		::tnt_update_container_reset(o);
+		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
+			__tnt_object sval;
+			add_value(&sval, it->second);
+			::tnt_update_assign(o, it->first, &sval);
+		}
+		::tnt_update_container_close(o);
+	};
+
+	auto make_call = [&] (const std::string &func) -> void {
+		__tnt_object tuple;
+		add_tuple(&tuple);
+
+		__tnt_request req;
+		::tnt_request_call(&req);
+		::tnt_request_set_func(&req, func.c_str(), func.length());
+		::tnt_request_set_tuple(&req, &tuple);
+
+		Send(&req);
+	};
+
+	// add Tarantool request
+	if (ev.event == "DELETE") {
+		if (ts.delete_call.empty()) {
+			__tnt_object key;
+			add_key(&key);
+
+			__tnt_request req;
+			::tnt_request_delete(&req);
+			::tnt_request_set_space(&req, ts.space);
+			::tnt_request_set_key(&req, &key);
+
+			Send(&req);
+		} else {
+			make_call(ts.delete_call);
+		}
+	} else if (ev.event == "INSERT") {
+		if (ts.insert_call.empty()) {
+			__tnt_object tuple;
+			add_tuple(&tuple);
+
+			__tnt_request req;
+			::tnt_request_replace(&req);
+			::tnt_request_set_space(&req, ts.space);
+			::tnt_request_set_tuple(&req, &tuple);
+
+			Send(&req);
+		} else {
+			make_call(ts.insert_call);
+		}
+	} else if (ev.event == "UPDATE") {
+		if (ts.update_call.empty()) {
+			__tnt_object key;
+			add_key(&key);
+
+			__tnt_object ops;
+			add_ops(&ops);
+
+			__tnt_request req;
+			::tnt_request_update(&req);
+			::tnt_request_set_space(&req, ts.space);
+			::tnt_request_set_key(&req, &key);
+			::tnt_request_set_ops(&req, &ops);
+
+			Send(&req);
+		} else {
+			make_call(ts.update_call);
+		}
+	} else if (ev.event == "UPSERT") {
+		__tnt_object tuple;
+		add_tuple(&tuple);
+
+		__tnt_object ops;
+		add_ops(&ops);
+
+		__tnt_request req;
+		::tnt_request_upsert(&req);
+		::tnt_request_set_space(&req, ts.space);
+		::tnt_request_set_tuple(&req, &tuple);
+		::tnt_request_set_ops(&req, &ops);
+
+		Send(&req);
+	} else {
+		throw std::range_error("Uknown binlog event: " + ev.event);
 	}
 
 	if (ev.binlog_name != "") {
 		binlog_name = ev.binlog_name;
 		binlog_pos = ev.binlog_pos;
 	}
-	last_unix_timestamp = time(NULL);
-	seconds_behind_master = ev.seconds_behind_master + last_unix_timestamp - ev.unix_timestamp;
-
-#if 0
-	std::ostringstream oss;
-	boost::archive::binary_oarchive oa(oss);
-	oa << ev;
-	std::cout << oss.str() << std::endl;
-#endif
 
 	return false;
 }
 
 // blocking send
-ssize_t TPWriter::Send(void *buf, ssize_t bytes)
+int64_t TPWriter::Send(struct ::tnt_request *req)
 {
-	int64_t r;
-	ssize_t total = 0;
-	do {
-		r = ::tb_sessend(&sess, static_cast<char *>(buf), bytes);
-		if (r > 0) {
-			total += r;
+	struct ::tnt_stream sbuf;
+	::tnt_buf(&sbuf);
+	const int64_t sync = ::tnt_request_compile(&sbuf, req);
+
+	size_t len = TNT_SBUF_SIZE(&sbuf);
+	char *buf = TNT_SBUF_DATA(&sbuf);
+
+	while (len > 0) {
+		const ssize_t r = sess.write(&sess, buf, len);
+		if (r < 0) {
+			const int _errno = ::tnt_errno(&sess);
+			if (_errno == EWOULDBLOCK || _errno == EAGAIN) {
+				continue;
+			}
+			::tnt_stream_free(&sbuf);
+			throw std::runtime_error("Send failed: " + std::string(::tnt_strerror(&sess)));
 		}
-	} while (r == -1 && (sess.errno_ == EWOULDBLOCK || sess.errno_ == EAGAIN));
-
-	if (r == -1) {
-		return -1;
+		len -= r;
+		buf += r;
 	}
 
-	return total;
-}
-
-// non-blocking receive
-ssize_t TPWriter::Recv(void *buf, ssize_t bytes)
-{
-	int64_t r = ::tb_sesrecv(&sess, static_cast<char *>(buf), bytes, 0);
-	if (r == -1 && (sess.errno_ == EWOULDBLOCK || sess.errno_ == EAGAIN)) {
-		return 0;
-	}
-	if (r == -1) {
-		throw std::runtime_error("Lost connection to Tarantool");
-		return -1;
-	}
-	return r;
+	::tnt_stream_free(&sbuf);
+	return sync;
 }
 
 bool TPWriter::Sync(bool force)
 {
-	int64_t r = 0;
-
 	if (next_ping_attempt == 0 || Milliseconds() > next_ping_attempt) {
 		force = true;
 		next_ping_attempt = Milliseconds() + TPWriter::PING_TIMEOUT;
 		Ping();
 	}
-
 	if (force || next_sync_attempt == 0 || Milliseconds() >= next_sync_attempt) {
 		SaveBinlogPos();
-
 		next_sync_attempt = Milliseconds() + sync_retry;
-		do {
-			r = ::tb_sessync(&sess);
-		} while (r == -1 && (sess.errno_ == EWOULDBLOCK || sess.errno_ == EAGAIN));
 	}
-
-	if (r == -1) {
-		throw std::runtime_error("Lost connection to Tarantool");
-	}
-	return r != -1;
+	return true;
 }
 
-int TPWriter::ReadReply(void)
+// non-blocking receive
+int TPWriter::Recv(struct ::tnt_reply *re)
 {
-	ssize_t len = ::tp_reqbuf(reply_buf, reply_bytes);
-	if (len > 0) {
-		if (reply_bytes + len > ssize_t(sizeof(reply_buf))) {
-			throw std::runtime_error("TPWriter::ReadReply: increase reply_buf size at least up to: " + (reply_bytes + len));
+	const int r = sess.read_reply(&sess, re);
+
+	if (r == 0) {
+		if (re->code) {
+			reply_server_code = re->code;
+			reply_error_msg = std::move(std::string(re->error, re->error_end - re->error));
 			return -1;
+		} else if (reply_server_code) {
+			reply_server_code = 0;
+			reply_error_msg = "";
 		}
-		len = Recv(reply_buf + reply_bytes, len);
-		if (len < 0) {
-			return -1;
-		}
-		if (len == 0) {
-			return 0;
-		}
-		reply_bytes += len;
-		len = ::tp_reqbuf(reply_buf, reply_bytes);
+		return r;
 	}
-
-	// got at least one full reply
-	if (len <= 0) {
-		ssize_t reply_len = reply_bytes + len;
-		if (reply_len == 0) {
-			return 0;
+	if (r < 0) {
+		const int _errno = ::tnt_errno(&sess);
+		if (_errno == EWOULDBLOCK || _errno == EAGAIN) {
+			return r;
 		}
-
-		::memcpy(reply_copy, reply_buf, reply_len);
-		::memmove(reply_buf, reply_buf + reply_len, sizeof(reply_buf) - reply_len);
-		reply_bytes -= reply_len;
-
-		::tp_init(&reply, reply_copy, reply_len, NULL, NULL);
-		reply_server_code = ::tp_reply(&reply);
-		reply_error_msg = reply_server_code != 0 ? ::tp_replyerror(&reply) : "";
-		return 1;
+		throw std::runtime_error("Recv failed: " + std::string(::tnt_strerror(&sess)));
 	}
-
-	return 0;
+	return r;
 }
 
-int TPWriter::GetReplyCode() const
+int TPWriter::ReadReply()
+{
+	int r;
+	__tnt_reply re;
+
+	do r = Recv(&re);
+	while (r == 0);
+	return r;
+}
+
+uint64_t TPWriter::GetReplyCode() const
 {
 	return reply_server_code;
 }
 
-const char *TPWriter::GetReplyErrorMessage() const
+const std::string& TPWriter::GetReplyErrorMessage() const
 {
 	return reply_error_msg;
 }

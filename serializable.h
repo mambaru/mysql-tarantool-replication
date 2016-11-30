@@ -6,7 +6,7 @@
 #include <sstream>
 #include <boost/any.hpp>
 #include <boost/serialization/serialization.hpp>
-#include <boost/serialization/vector.hpp>
+#include <boost/serialization/map.hpp>
 
 namespace replicator {
 
@@ -29,7 +29,23 @@ private:
 		} else {
 			std::ostringstream s;
 
-			if (v.type() == typeid(int)) {
+			if (v.type() == typeid(char)) {
+				type_id = "int";
+				s << (short)boost::any_cast<char>(v);
+			}
+			else if (v.type() == typeid(unsigned char)) {
+				type_id = "uint";
+				s << (unsigned short)boost::any_cast<unsigned char>(v);
+			}
+			else if (v.type() == typeid(short)) {
+				type_id = "int";
+				s << boost::any_cast<short>(v);
+			}
+			else if (v.type() == typeid(unsigned short)) {
+				type_id = "uint";
+				s << boost::any_cast<unsigned short>(v);
+			}
+			else if (v.type() == typeid(int)) {
 				type_id = "int";
 				s << boost::any_cast<int>(v);
 			}
@@ -37,40 +53,32 @@ private:
 				type_id = "uint";
 				s << boost::any_cast<unsigned int>(v);
 			}
-			else if (v.type() == typeid(double)) {
-				type_id = "double";
-				s << boost::any_cast<double>(v);
+			else if (v.type() == typeid(long)) {
+				type_id = "int";
+				s << boost::any_cast<long>(v);
+			}
+			else if (v.type() == typeid(unsigned long)) {
+				type_id = "uint";
+				s << boost::any_cast<unsigned long>(v);
+			}
+			else if (v.type() == typeid(long long)) {
+				type_id = "int";
+				s << boost::any_cast<long long>(v);
 			}
 			else if (v.type() == typeid(unsigned long long)) {
-				type_id = "ull";
+				type_id = "uint";
 				s << boost::any_cast<unsigned long long>(v);
 			}
 			else if (v.type() == typeid(float)) {
 				type_id = "float";
 				s << boost::any_cast<float>(v);
 			}
-			else if (v.type() == typeid(char)) {
-				type_id = "int";
-				s << int(boost::any_cast<char>(v));
+			else if (v.type() == typeid(double)) {
+				type_id = "double";
+				s << boost::any_cast<double>(v);
 			}
-			else if (v.type() == typeid(unsigned char)) {
-				type_id = "uint";
-				s << unsigned(boost::any_cast<unsigned char>(v));
-			}
-			else if (v.type() == typeid(short)) {
-				type_id = "int";
-				s << int(boost::any_cast<short>(v));
-			}
-			else if (v.type() == typeid(unsigned short)) {
-				type_id = "uint";
-				s << unsigned(boost::any_cast<unsigned short>(v));
-			}
-			else if (v.type() == typeid(void)) {
+			else {
 				type_id = "null";
-			}
-			else  {
-				type_id = "long";
-				s << boost::any_cast<long>(v);
 			}
 			second = s.str();
 		}
@@ -79,20 +87,11 @@ private:
 public:
 	std::string second;
 
-	SerializableValue ()
-	{
-	}
+	SerializableValue () {}
 
-	SerializableValue (const boost::any &v)
-	{
-		fromAny(v);
-	}
+	SerializableValue (const boost::any &v) { fromAny(v); }
 
-	SerializableValue & operator = (const boost::any &v)
-	{
-		fromAny(v);
-		return *this;
-	}
+	SerializableValue& operator= (const boost::any &v) { fromAny(v); return *this; }
 
 	boost::any operator *() const {
 		if (type_id == "string") {
@@ -101,18 +100,13 @@ public:
 
 		std::istringstream s(second);
 
-		if (type_id == "uint") {
-			unsigned int val;
-			s >> val;
-			return boost::any(val);
-		}
 		if (type_id == "int") {
-			int val;
+			long long val;
 			s >> val;
 			return boost::any(val);
 		}
-		if (type_id == "double") {
-			double val;
+		if (type_id == "uint") {
+			unsigned long long val;
 			s >> val;
 			return boost::any(val);
 		}
@@ -121,26 +115,24 @@ public:
 			s >> val;
 			return boost::any(val);
 		}
-		if (type_id == "ull") {
-			unsigned long long val;
+		if (type_id == "double") {
+			double val;
 			s >> val;
 			return boost::any(val);
 		}
-		if (type_id == "null") {
-			return boost::any();
-		}
 
-		long val;
-		s >> val;
-		return boost::any(val);
+		return boost::any();
 	}
 
 	const std::string & value_string() const {
 		return second;
 	}
+
+	const std::string& get_type_id() const {
+		return type_id;
+	}
 };
 
-typedef std::vector<SerializableValue> SerializableRow;
 
 class SerializableBinlogEvent
 {
@@ -160,7 +152,7 @@ public:
 	std::string database;
 	std::string table;
 	std::string event;
-	SerializableRow row;
+	std::map<unsigned, SerializableValue> row;
 };
 
 } // replicator

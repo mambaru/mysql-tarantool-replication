@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# chkconfig: - 99 99
+# description: replicatord daemon control script
+# processname: replicatord
+# pidfile: /var/run/replicatord.pid
+
+. /etc/init.d/functions
+ulimit -c unlimited
+
+#### need to change ####
+PROG="replicatord"
+export BINFILE="/usr/local/sbin/$PROG"
+export INSTANCE=""
+export OPTIONS=""
+########################
+
+BASENAME=`basename $BINFILE`
+if [ -n "$INSTANCE" ]; then
+  SUFIX=".$INSTANCE"
+fi
+
+export PIDFILE=/var/run/$BASENAME$SUFIX-wrapper.pid
+export CHILDPIDFILE=/var/run/$BASENAME$SUFIX.pid
+RETVAL=0
+
+start() {
+        echo -n $"Starting $BASENAME$SUFIX: "
+        ulimit -n 65536 
+        /usr/local/bin/mailru-wrapper.sh $BINFILE $INSTANCE $OPTIONS >/dev/null 2>/dev/null </dev/null &
+        echo_success
+        echo
+        return $RETVAL
+}
+
+stop() {
+        echo -n $"Stopping $BASENAME$SUFIX: "
+        [ -f $CHILDPIDFILE ] && childpid=$(cat $CHILDPIDFILE)
+
+        killproc -p $PIDFILE -d 1000 /usr/local/bin/mailru-wrapper.sh && echo_success || echo_failure
+
+        if [ -n "$childpid" ]; then
+            while checkpid $childpid; do
+                sleep 1
+            done
+        fi
+
+        echo
+        return $RETVAL
+}
+
+restart(){
+        stop
+        start
+}
+
+case "$1" in
+  start)
+        start
+        ;;
+  stop)
+        stop
+        ;;
+  restart)
+        restart
+        ;;
+  status)
+        status -p "$PIDFILE" $PROG
+        RETVAL=$?
+        ;;
+  *)
+        echo $"Usage: $0 {start|stop|restart|status}"
+        RETVAL=1
+esac
+
+exit $RETVAL

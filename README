@@ -1,0 +1,3 @@
+MySql binlog to Tarantool replication daemon
+
+Please refer to https://confluence.mail.ru/display/RB/replicatord for more information.

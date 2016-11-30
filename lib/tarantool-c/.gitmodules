@@ -1,3 +1,0 @@
-[submodule "lib/msgpuck"]
-	path = lib/msgpuck
-	url = https://github.com/tarantool/msgpuck

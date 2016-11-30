@@ -128,10 +128,8 @@ void DBReader::EventCallback(const slave::RecordSet& event, const std::map<std::
 
 	switch (event.type_event) {
 		case slave::RecordSet::Delete: ev.event = "DELETE"; break;
-		// case slave::RecordSet::Update: ev.event = "UPDATE"; break;
-		// case slave::RecordSet::Write:  ev.event = "INSERT"; break;
-		case slave::RecordSet::Update:
-		case slave::RecordSet::Write:  ev.event = "UPSERT"; break;
+		case slave::RecordSet::Update: ev.event = "UPDATE"; break;
+		case slave::RecordSet::Write:  ev.event = "INSERT"; break;
 		default:                       ev.event = "IGNORE";
 	}
 
@@ -176,8 +174,7 @@ void DBReader::DumpTablesCallback(
 	ev.binlog_pos = 0;
 	ev.database = db_name;
 	ev.table = tbl_name;
-	// ev.event = "INSERT";
-	ev.event = "UPSERT";
+	ev.event = "INSERT";
 	ev.seconds_behind_master = GetSecondsBehindMaster();
 	ev.unix_timestamp = long(time(NULL));
 

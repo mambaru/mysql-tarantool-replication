@@ -293,18 +293,6 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 		::tnt_update_container_close(o);
 	};
 
-	auto make_call = [&] (const std::string &func) -> void {
-		__tnt_object tuple;
-		add_tuple(&tuple);
-
-		__tnt_request req;
-		::tnt_request_call(&req);
-		::tnt_request_set_func(&req, func.c_str(), func.length());
-		::tnt_request_set_tuple(&req, &tuple);
-
-		Send(&req);
-	};
-
 	// add Tarantool request
 	if (ev.event == "DELETE") {
 		if (ts.delete_call.empty()) {
@@ -318,21 +306,58 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 
 			Send(&req);
 		} else {
-			make_call(ts.delete_call);
+			__tnt_object args;
+			::tnt_object_add_array(&args, 1);
+			add_key(&args);
+			::tnt_object_container_close(&args);
+
+			__tnt_request req;
+			::tnt_request_call(&req);
+			::tnt_request_set_tuple(&req, &args);
+
+			const std::string& func = ts.delete_call;
+			::tnt_request_set_func(&req, func.c_str(), func.length());
+
+			Send(&req);
 		}
 	} else if (ev.event == "INSERT") {
 		if (ts.insert_call.empty()) {
+			// __tnt_object tuple;
+			// add_tuple(&tuple);
+
+			// __tnt_request req;
+			// ::tnt_request_replace(&req);
+			// ::tnt_request_set_space(&req, ts.space);
+			// ::tnt_request_set_tuple(&req, &tuple);
+
 			__tnt_object tuple;
 			add_tuple(&tuple);
 
+			__tnt_object ops;
+			add_ops(&ops);
+
 			__tnt_request req;
-			::tnt_request_replace(&req);
+			::tnt_request_upsert(&req);
 			::tnt_request_set_space(&req, ts.space);
 			::tnt_request_set_tuple(&req, &tuple);
+			::tnt_request_set_ops(&req, &ops);
 
 			Send(&req);
 		} else {
-			make_call(ts.insert_call);
+			__tnt_object args;
+			::tnt_object_add_array(&args, 2);
+			add_tuple(&args);
+			add_ops(&args);
+			::tnt_object_container_close(&args);
+
+			__tnt_request req;
+			::tnt_request_call(&req);
+			::tnt_request_set_tuple(&req, &args);
+
+			const std::string& func = ts.insert_call;
+			::tnt_request_set_func(&req, func.c_str(), func.length());
+
+			Send(&req);
 		}
 	} else if (ev.event == "UPDATE") {
 		if (ts.update_call.empty()) {
@@ -350,22 +375,21 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 
 			Send(&req);
 		} else {
-			make_call(ts.update_call);
+			__tnt_object args;
+			::tnt_object_add_array(&args, 2);
+			add_key(&args);
+			add_ops(&args);
+			::tnt_object_container_close(&args);
+
+			__tnt_request req;
+			::tnt_request_call(&req);
+			::tnt_request_set_tuple(&req, &args);
+
+			const std::string& func = ts.update_call;
+			::tnt_request_set_func(&req, func.c_str(), func.length());
+
+			Send(&req);
 		}
-	} else if (ev.event == "UPSERT") {
-		__tnt_object tuple;
-		add_tuple(&tuple);
-
-		__tnt_object ops;
-		add_ops(&ops);
-
-		__tnt_request req;
-		::tnt_request_upsert(&req);
-		::tnt_request_set_space(&req, ts.space);
-		::tnt_request_set_tuple(&req, &tuple);
-		::tnt_request_set_ops(&req, &ops);
-
-		Send(&req);
 	} else {
 		throw std::range_error("Uknown binlog event: " + ev.event);
 	}

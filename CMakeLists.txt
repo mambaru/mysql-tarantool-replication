@@ -15,15 +15,7 @@ set(REPLICATOR_SRC
 
 add_subdirectory(lib/tarantool-c)
 add_subdirectory(lib/libslave)
-
-include(ExternalProject)
-ExternalProject_Add(libconfig
-  SOURCE_DIR ${REPLICATOR_ROOT}/lib/libconfig/
-  CONFIGURE_COMMAND ${REPLICATOR_ROOT}/lib/libconfig/configure --prefix=${CMAKE_CURRENT_SOURCE_DIR}/lib/libconfig
-  PREFIX ${REPLICATOR_ROOT}/lib/libconfig
-  BUILD_COMMAND make
-  BUILD_IN_SOURCE 1
-)
+add_subdirectory(lib/yaml-cpp)
 
 include(FindPackageHandleStandardArgs)
 find_path(IMYSQL mysql/mysql.h)
@@ -32,7 +24,7 @@ find_package_handle_standard_args(Mysql DEFAULT_MSG IMYSQL)
 include_directories(
 	"${REPLICATOR_ROOT}"
 	"${REPLICATOR_ROOT}/lib/libslave"
-	"${REPLICATOR_ROOT}/lib/libconfig/include"
+	"${REPLICATOR_ROOT}/lib/yaml-cpp/include"
 	"${REPLICATOR_ROOT}/lib/tarantool-c/include"
 	"${REPLICATOR_ROOT}/lib/tarantool-c/third_party/msgpuck"
 	"${IMYSQL}/mysql"
@@ -47,7 +39,7 @@ find_library(LBOOST_SERIALIZATION_MT boost_serialization)
 add_executable(rp ${REPLICATOR_SRC})
 set_target_properties(rp PROPERTIES COMPILE_FLAGS "${REPLICATOR_CFLAGS}")
 set_target_properties(rp PROPERTIES OUTPUT_NAME ${REPLICATOR_NAME})
-target_link_libraries(rp tnt slave_a ${REPLICATOR_ROOT}/lib/libconfig/lib/.libs/libconfig++.a)
+target_link_libraries(rp tnt slave_a yaml-cpp)
 target_link_libraries(rp ${LMYSQL_CLIENT_R} ${LPTHREAD} ${LZMQ} ${LBOOST_SYSTEM_MT} ${LBOOST_SERIALIZATION_MT} rt dl ssl crypto z)
 
 install(TARGETS rp RUNTIME DESTINATION sbin)

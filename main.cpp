@@ -6,11 +6,12 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include "serializable.h"
 
 #include <zmq.h>
 #include <zmq_utils.h>
 
-#include <libconfig.h++>
+#include <yaml-cpp/yaml.h>
 
 #include "dbreader.h"
 #include "tpwriter.h"
@@ -360,129 +361,119 @@ static bool dbread_callback(const SerializableBinlogEvent &ev, std::string &TpBi
 	return false;
 }
 
-static void init(libconfig::Config &cfg)
+static void init(YAML::Node& cfg)
 {
-	unsigned watchdog_timeout = 60;
+	unsigned watchdog_timeout;
 
 	try
 	{
-		const libconfig::Setting& root = cfg.getRoot();
-
 		// read Mysql settings
 		{
-			const libconfig::Setting &mysql = root["mysql"];
-
-			unsigned port = 3306;
-			unsigned connect_retry = 15;
-			mysql.lookupValue("port", port);
-			mysql.lookupValue("connect_retry", connect_retry);
-			mysql.lookupValue("watchdog_timeout", watchdog_timeout);
+			const YAML::Node& mysql = cfg["mysql"];
+			watchdog_timeout = mysql["watchdog_timeout"].as<unsigned>();
 
 			nanomysql::mysql_conn_opts opts;
-			opts.mysql_host = (const char*)mysql["host"];
-			opts.mysql_port = port;
-			opts.mysql_user = (const char*)mysql["user"];
-			opts.mysql_pass = (const char*)mysql["password"];
+			opts.mysql_host = mysql["host"].as<std::string>();
+			opts.mysql_port = mysql["port"].as<unsigned>();
+			opts.mysql_user = mysql["user"].as<std::string>();
+			opts.mysql_pass = mysql["password"].as<std::string>();
 
-			dbreader = new DBReader(opts, connect_retry);
+			dbreader = new DBReader(opts, mysql["connect_retry"].as<unsigned>());
 		}
-
 		// read Tarantool config
 		{
-			const libconfig::Setting &tarantool = root["tarantool"];
-
-			std::string user(""), password("");
-			unsigned connect_retry = 15;
-			unsigned sync_retry = 1000;
-			bool disconnect_on_error = false;
-			tarantool.lookupValue("user", user);
-			tarantool.lookupValue("password", password);
-			tarantool.lookupValue("connect_retry", connect_retry);
-			tarantool.lookupValue("sync_retry", sync_retry);
-			tarantool.lookupValue("disconnect_on_error", disconnect_on_error);
+			const YAML::Node& tarantool = cfg["tarantool"];
 
 			tpwriter = new TPWriter(
-				(const char *)tarantool["host"],
-				user,
-				password,
-				(uint32_t)tarantool["binlog_pos_space"],
-				(uint32_t)tarantool["binlog_pos_key"],
-				connect_retry,
-				sync_retry,
-				disconnect_on_error
+				tarantool["host"].as<std::string>(),
+				tarantool["user"].as<std::string>(),
+				tarantool["password"].as<std::string>(),
+				tarantool["binlog_pos_space"].as<unsigned>(),
+				tarantool["binlog_pos_key"].as<unsigned>(),
+				tarantool["connect_retry"].as<unsigned>(),
+				tarantool["sync_retry"].as<unsigned>(),
+				tarantool["disconnect_on_error"].as<bool>()
 			);
 		}
-
 		// read Mysql to Tarantool mappings (each table maps to a single Tarantool space)
 		{
-			const libconfig::Setting &mappings = root["mappings"];
-			int count = mappings.getLength();
+			const YAML::Node& mappings = cfg["mappings"];
 
-			for (int i = 0; i < count; i++) {
-				const libconfig::Setting &mapping = mappings[i];
-				const std::string database((const char *)mapping["database"]);
-				const std::string table((const char *)mapping["table"]);
-				std::string insert_call = TPWriter::empty_call;
-				std::string update_call = TPWriter::empty_call;
-				std::string delete_call = TPWriter::empty_call;
-				unsigned space((unsigned)mapping["space"]);
+			for (int i = 0; i < mappings.size(); i++) {
+				const YAML::Node& mapping = mappings[i];
+
+				const std::string database = mapping["database"].as<std::string>();
+				const std::string table = mapping["table"].as<std::string>();
+
+				std::string insert_call = mapping["insert_call"] ? mapping["insert_call"].as<std::string>() : TPWriter::empty_call;
+				std::string update_call = mapping["update_call"] ? mapping["update_call"].as<std::string>() : TPWriter::empty_call;
+				std::string delete_call = mapping["delete_call"] ? mapping["delete_call"].as<std::string>() : TPWriter::empty_call;
+
+				const unsigned space = mapping["space"].as<unsigned>();
 				std::map<std::string, unsigned> columns;
 				TPWriter::Tuple keys;
 				unsigned index_max = tpwriter->space_last_id[space];
 
 				// read key tarantool fields we'll use for delete requests
 				{
-					const libconfig::Setting &keys_ = mapping["key_fields"];
-					for (int i = 0; i < keys_.getLength(); i++) {
-						unsigned key = keys_[i];
+					const YAML::Node& keys_ = mapping["key_fields"];
+					for (int i = 0; i < keys_.size(); i++) {
+						unsigned key = keys_[i].as<unsigned>();
 						index_max = std::max(index_max, key);
 						keys.push_back(key);
 					}
 				}
 				// read columns tuple
 				{
-					const libconfig::Setting &columns_ = mapping["columns"];
-					for (int i = 0; i < columns_.getLength(); i++) {
+					const YAML::Node& columns_ = mapping["columns"];
+					for (int i = 0; i < columns_.size(); i++) {
 						unsigned index = i < keys.size() ? keys[i] : ++index_max;
-						columns[ (const char *)columns_[i] ] = index;
+						columns[ columns_[i].as<std::string>() ] = index;
 					}
 				}
-				// lookup LUA procedures we can call instead of issuing DML requests
-				{
-					mapping.lookupValue("insert_call", insert_call);
-					mapping.lookupValue("update_call", update_call);
-					mapping.lookupValue("delete_call", delete_call);
-				}
 
-				bool do_dump = true;
-				mapping.lookupValue("dump", do_dump);
-
-				dbreader->AddTable(database, table, columns, do_dump);
+				dbreader->AddTable(database, table, columns, mapping["dump"].as<bool>());
 				tpwriter->AddTable(database, table, space, keys, insert_call, update_call, delete_call);
 				tpwriter->space_last_id[space] = index_max;
 			}
 		}
-
-		// read graphite config
+		// read space settings
 		{
-			std::string host("nerv1.i");
-			unsigned port = 2003;
-			std::string prefix("rb.");
+			const YAML::Node& spaces = cfg["spaces"];
 
-			if (root.exists("graphite"))
-			{
-				const libconfig::Setting &graphite_ = root["graphite"];
-				graphite_.lookupValue("host", host);
-				graphite_.lookupValue("port", port);
-				graphite_.lookupValue("prefix", prefix);
+			for (auto its = spaces.begin(); its != spaces.end(); ++its) {
+				unsigned space = its->first.as<unsigned>();
+				std::map<unsigned, SerializableValue>& rn_ = tpwriter->replace_null[ space ];
+				const YAML::Node& replace_null = its->second["replace_null"];
+
+				for (auto itrn = replace_null.begin(); itrn != replace_null.end(); ++itrn) {
+					const YAML::Node& field = itrn->second;
+					auto itf = field.begin();
+					if (itf == field.end()) continue;
+
+					unsigned index = itrn->first.as<unsigned>();
+					std::string type = itf->first.as<std::string>();
+					const YAML::Node& value = itf->second;
+					boost::any anyv;
+
+					if (type == "string") {
+						anyv = value.as<std::string>();
+					} else if (type == "unsigned") {
+						anyv = value.as<unsigned long long>();
+					} else if (type == "integer") {
+						anyv = value.as<long long>();
+					} else {
+						std::cerr << "Config error: unknown type for non-null value for column " << index << std::endl;
+						exit(EXIT_FAILURE);
+					}
+					rn_[ index ] = anyv;
+				}
 			}
-
-			graphite = new Graphite(host, port, prefix);
 		}
 	}
-	catch(const libconfig::SettingNotFoundException &nfex)
+	catch(YAML::Exception& ex)
 	{
-		std::cerr << nfex.what() << " :: " << nfex.getPath() << std::endl;
+		std::cerr << "Config error: " << ex.what() << std::endl;
 		exit(EXIT_FAILURE);
 	}
 
@@ -671,22 +662,16 @@ int main(int argc, char** argv)
 	openlogfile();
 	atexit(closelogfile);
 
-	libconfig::Config cfg;
+	YAML::Node cfg;
 
 	// Read the file. If there is an error, report it and exit.
 	try
 	{
-		cfg.readFile(config_name.c_str());
+		cfg = YAML::LoadFile(config_name.c_str());
 	}
-	catch(const libconfig::FileIOException &fioex)
+	catch(YAML::Exception& ex)
 	{
-		std::cerr << "I/O error while reading file " << config_name << std::endl;
-		return EXIT_FAILURE;
-	}
-	catch(const libconfig::ParseException &pex)
-	{
-		std::cerr << "Parse error at " << pex.getFile() << ":" << pex.getLine()
-			<< " - " << pex.getError() << std::endl;
+		std::cerr << "Config error: " << ex.what() << std::endl;
 		return EXIT_FAILURE;
 	}
 

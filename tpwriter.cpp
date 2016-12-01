@@ -235,7 +235,30 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 
 	const TableSpace &ts = itm->second;
 
-	auto add_value = [] (struct ::tnt_stream *o, const SerializableValue &v) -> void {
+	auto add_nil_with_replace = [&] (struct ::tnt_stream *o, const unsigned index) -> void {
+		const auto irn = replace_null.find(ts.space);
+		if (irn != replace_null.end()) {
+			const auto irnv = irn->second.find(index);
+			if (irnv != irn->second.end()) {
+				const SerializableValue& v = irnv->second;
+				if (v.get_type_id() == "string") {
+					const std::string &vs = v.value_string();
+					::tnt_object_add_str(o, vs.c_str(), vs.length());
+				} else if (v.get_type_id() == "int") {
+					::tnt_object_add_int(o, boost::any_cast<long long>(*v));
+				} else if (v.get_type_id() == "uint") {
+					::tnt_object_add_uint(o, boost::any_cast<unsigned long long>(*v));
+				} else {
+					throw std::range_error(std::string("Typecasting error for non-null value for column: " + index));
+				}
+				return;
+			}
+		}
+
+		::tnt_object_add_nil(o);
+	};
+
+	auto add_value = [&] (struct ::tnt_stream *o, const unsigned index, const SerializableValue &v) -> void {
 		try {
 			if (v.get_type_id() == "string") {
 				const std::string &vs = v.value_string();
@@ -249,7 +272,7 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 			} else if (v.get_type_id() == "double") {
 				::tnt_object_add_double(o, boost::any_cast<double>(*v));
 			} else {
-				::tnt_object_add_nil(o);
+				add_nil_with_replace(o, index);
 			}
 		}
 		catch (boost::bad_any_cast &ex) {
@@ -260,7 +283,7 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 	auto add_key = [&] (struct ::tnt_stream *o) -> void {
 		::tnt_object_add_array(o, ts.keys.size());
 		for (const auto i : ts.keys) {
-			add_value(o, ev.row.at(i));
+			add_value(o, i, ev.row.at(i));
 		}
 		::tnt_object_container_close(o);
 	};
@@ -272,13 +295,13 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 		// so fill the gaps to match columns count
 		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
 			// fill gaps
-			for (; i_nil < it->first; ++i_nil) ::tnt_object_add_nil(o);
+			for (; i_nil < it->first; ++i_nil) add_nil_with_replace(o, i_nil);
 
-			add_value(o, it->second);
+			add_value(o, it->first, it->second);
 			i_nil = it->first + 1;
 		}
 		// fill gaps
-		for (; i_nil <= space_last_id[ts.space]; ++i_nil) ::tnt_object_add_nil(o);
+		for (; i_nil <= space_last_id[ts.space]; ++i_nil) add_nil_with_replace(o, i_nil);
 
 		::tnt_object_container_close(o);
 	};
@@ -291,7 +314,7 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 		}
 		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
 			__tnt_object sval;
-			add_value(&sval, it->second);
+			add_value(&sval, it->first, it->second);
 			::tnt_update_assign(o, it->first, &sval);
 		}
 		if (sparse) {

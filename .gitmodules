@@ -6,3 +6,6 @@
 	path = lib/libslave
 	url = git@gitlab7.lan:cpp/libslave.git
 	branch = mamba
+[submodule "lib/yaml-cpp"]
+	path = lib/yaml-cpp
+	url = https://github.com/jbeder/yaml-cpp.git

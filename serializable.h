@@ -124,7 +124,7 @@ public:
 		return boost::any();
 	}
 
-	const std::string & value_string() const {
+	const std::string& value_string() const {
 		return second;
 	}
 

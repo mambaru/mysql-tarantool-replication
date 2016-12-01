@@ -53,6 +53,7 @@ public:
 
 	static const std::string empty_call;
 	std::map<uint32_t, unsigned> space_last_id;
+	std::map<unsigned, std::map<unsigned, SerializableValue>> replace_null;
 
 private:
 	static const unsigned int PING_TIMEOUT = 5000;

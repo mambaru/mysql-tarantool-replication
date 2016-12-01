@@ -115,7 +115,7 @@ bool TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos
 			break;
 		}
 		else if (r < 0 && reply_server_code) {
-			std::cerr << "ReadBinlogPos Tarantool eror: " << reply_error_msg << " (code: " << reply_server_code << ")" << std::endl;
+			std::cerr << "ReadBinlogPos Tarantool error: " << reply_error_msg << " (code: " << reply_server_code << ")" << std::endl;
 			return false;
 		}
 		else {
@@ -283,14 +283,22 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 		::tnt_object_container_close(o);
 	};
 
-	auto add_ops = [&] (struct ::tnt_stream *o) -> void {
-		::tnt_update_container_reset(o);
+	auto add_ops = [&] (struct ::tnt_stream *o, const bool sparse = true) -> void {
+		if (sparse) {
+			::tnt_update_container_reset(o);
+		} else {
+			::tnt_object_add_array(o, ev.row.size());
+		}
 		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
 			__tnt_object sval;
 			add_value(&sval, it->second);
 			::tnt_update_assign(o, it->first, &sval);
 		}
-		::tnt_update_container_close(o);
+		if (sparse) {
+			::tnt_update_container_close(o);
+		} else {
+			::tnt_object_container_close(o);
+		}
 	};
 
 	// add Tarantool request
@@ -347,7 +355,7 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 			__tnt_object args;
 			::tnt_object_add_array(&args, 2);
 			add_tuple(&args);
-			add_ops(&args);
+			add_ops(&args, false);
 			::tnt_object_container_close(&args);
 
 			__tnt_request req;
@@ -378,7 +386,7 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 			__tnt_object args;
 			::tnt_object_add_array(&args, 2);
 			add_key(&args);
-			add_ops(&args);
+			add_ops(&args, false);
 			::tnt_object_container_close(&args);
 
 			__tnt_request req;

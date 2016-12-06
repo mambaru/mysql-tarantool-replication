@@ -235,10 +235,17 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
 
 	const TableSpace &ts = itm->second;
 
+	const auto irn = replace_null.find(ts.space);
+	const std::map<unsigned, SerializableValue>* replace_null_;
+	if (irn != replace_null.end()) {
+		replace_null_ = &irn->second;
+	} else {
+		replace_null_ = NULL;
+	}
+
 	auto add_nil_with_replace = [&] (struct ::tnt_stream *o, const unsigned index) -> void {
-		const auto irn = replace_null.find(ts.space);
-		if (irn != replace_null.end()) {
-			const auto irnv = irn->second.find(index);
+		if (replace_null_) {
+			const auto irnv = replace_null_->find(index);
 			if (irnv != irn->second.end()) {
 				const SerializableValue& v = irnv->second;
 				if (v.get_type_id() == "string") {

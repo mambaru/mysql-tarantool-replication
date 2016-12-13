@@ -1,17 +1,12 @@
-#include <sstream>
-#include <boost/any.hpp>
-#include <boost/archive/binary_oarchive.hpp>
-#include <boost/archive/text_oarchive.hpp>
+#include <iostream>
+#include <sys/time.h>
 
 #include <tarantool/tarantool.h>
 #include <tarantool/tnt_net.h>
 #include <tarantool/tnt_opt.h>
 #include <msgpuck.h>
 
-#include <zmq.h>
-#include <zmq_utils.h>
-
-#include <sys/time.h>
+#include <boost/any.hpp>
 
 #include "tpwriter.h"
 #include "serializable.h"
@@ -27,8 +22,7 @@ TPWriter::TPWriter(
 	uint32_t binlog_key_space,
 	uint32_t binlog_key,
 	unsigned connect_retry,
-	unsigned sync_retry,
-	bool disconnect_on_error
+	unsigned sync_retry
 ) :
 	host(host),
 	user(user),
@@ -43,7 +37,6 @@ TPWriter::TPWriter(
 	next_connect_attempt(0),
 	next_sync_attempt(0),
 	next_ping_attempt(0),
-	disconnect_on_error(disconnect_on_error),
 	reply_server_code(0),
 	reply_error_msg("")
 {
@@ -72,7 +65,7 @@ bool TPWriter::Connect()
 		return false;
 	}
 	if (::tnt_connect(&sess) < 0) {
-		std::cout << "Could not connect to Tarantool: " << ::tnt_strerror(&sess) << std::endl;
+		std::cerr << "Could not connect to Tarantool: " << ::tnt_strerror(&sess) << std::endl;
 		::tnt_close(&sess);
 		next_connect_attempt = ::time(NULL) + connect_retry;
 		return false;
@@ -217,7 +210,7 @@ inline void TPWriter::SaveBinlogPos()
 	Send(&req);
 }
 
-bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent &ev)
+bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 {
 	// spacial case event "IGNORE", which only updates binlog position
 	// but doesn't modify any table data
@@ -511,9 +504,10 @@ int TPWriter::Recv(struct ::tnt_reply *re)
 int TPWriter::ReadReply()
 {
 	int r;
-	__tnt_reply re;
-
-	do r = Recv(&re);
+	do {
+		__tnt_reply re;
+		r = Recv(&re);
+	}
 	while (r == 0);
 	return r;
 }

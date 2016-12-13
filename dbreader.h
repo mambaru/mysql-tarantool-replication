@@ -14,7 +14,6 @@
 
 namespace replicator {
 
-typedef unsigned long BinlogPos;
 typedef std::function<bool (const SerializableBinlogEvent &ev)> BinlogEventCallback;
 
 struct DBTable
@@ -36,14 +35,13 @@ public:
 	~DBReader();
 
 	void AddTable(const std::string &db, const std::string &table, std::map<std::string, unsigned>& filter, bool do_dump);
-	void DumpTables(std::string &binlog_name, BinlogPos &binlog_pos, BinlogEventCallback f);
-	void ReadBinlog(const std::string &binlog_name, BinlogPos binlog_pos, BinlogEventCallback cb);
+	void DumpTables(std::string &binlog_name, unsigned long &binlog_pos, BinlogEventCallback f);
+	void ReadBinlog(const std::string &binlog_name, unsigned long binlog_pos, BinlogEventCallback cb);
 	void Stop();
 
 	void EventCallback(const slave::RecordSet& event, const std::map<std::string, unsigned>& filter, BinlogEventCallback cb);
-
 	void DummyEventCallback(const slave::RecordSet& event) {};
-	bool ReadBinlogCallback();
+
 	void XidEventCallback(unsigned int server_id, BinlogEventCallback cb);
 	void DumpTablesCallback(
 		const std::string &db_name,

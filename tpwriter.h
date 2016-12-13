@@ -19,8 +19,7 @@ public:
 		uint32_t binlog_key_space,
 		uint32_t binlog_key,
 		unsigned connect_retry = 15,
-		unsigned sync_retry = 1000,
-		bool disconnect_on_error = false
+		unsigned sync_retry = 1000
 	);
 	~TPWriter();
 
@@ -28,7 +27,7 @@ public:
 	void Disconnect();
 	bool ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos);
 	bool Sync(bool force = false);
-	bool BinlogEventCallback(const SerializableBinlogEvent &ev);
+	bool BinlogEventCallback(const SerializableBinlogEvent& ev);
 	inline void Ping();
 
 	// return values:
@@ -37,7 +36,6 @@ public:
 	int ReadReply();
 	uint64_t GetReplyCode() const;
 	const std::string& GetReplyErrorMessage() const;
-	bool DisconnectOnError() const { return disconnect_on_error; }
 
 	typedef std::vector<unsigned> Tuple;
 
@@ -72,7 +70,6 @@ private:
 	uint64_t next_sync_attempt; /* milliseconds */
 	uint64_t next_ping_attempt; /* milliseconds */
 	struct ::tnt_stream sess;
-	bool disconnect_on_error;
 
 	// blocking send
 	int64_t Send(struct ::tnt_request *req);

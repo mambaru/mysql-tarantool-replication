@@ -32,7 +32,6 @@ include_directories(
 
 find_library(LMYSQL_CLIENT_R perconaserverclient_r PATH_SUFFIXES mysql)
 find_library(LPTHREAD pthread)
-find_library(LZMQ zmq)
 find_library(LBOOST_SYSTEM_MT boost_system)
 find_library(LBOOST_SERIALIZATION_MT boost_serialization)
 
@@ -40,7 +39,7 @@ add_executable(rp ${REPLICATOR_SRC})
 set_target_properties(rp PROPERTIES COMPILE_FLAGS "${REPLICATOR_CFLAGS}")
 set_target_properties(rp PROPERTIES OUTPUT_NAME ${REPLICATOR_NAME})
 target_link_libraries(rp tnt slave_a yaml-cpp)
-target_link_libraries(rp ${LMYSQL_CLIENT_R} ${LPTHREAD} ${LZMQ} ${LBOOST_SYSTEM_MT} ${LBOOST_SERIALIZATION_MT} rt dl ssl crypto z)
+target_link_libraries(rp ${LMYSQL_CLIENT_R} ${LPTHREAD} ${LBOOST_SYSTEM_MT} ${LBOOST_SERIALIZATION_MT} rt dl ssl crypto z)
 
 install(TARGETS rp RUNTIME DESTINATION sbin)
 install(FILES replicatord.cfg DESTINATION etc)

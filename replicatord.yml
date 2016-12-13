@@ -4,7 +4,6 @@ mysql:
     user: tarantool
     password: tarant00l
     connect_retry: 15
-    watchdog_timeout: 60
 
 tarantool:
     host: 10.5.4.248:5000
@@ -14,7 +13,6 @@ tarantool:
     binlog_pos_key: 0
     connect_retry: 15
     sync_retry: 1000
-    disconnect_on_error: false
 
 mappings:
     - database: Monamour2

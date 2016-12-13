@@ -19,7 +19,7 @@ void DBReader::AddTable(const std::string& db, const std::string& table, std::ma
 	tables.emplace_back(db, table, filter, do_dump);
 }
 
-void DBReader::DumpTables(std::string &binlog_name, BinlogPos &binlog_pos, BinlogEventCallback cb)
+void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, BinlogEventCallback cb)
 {
 	slave::callback dummycallback = std::bind(&DBReader::DummyEventCallback, this, _1);
 
@@ -89,7 +89,7 @@ void DBReader::DumpTables(std::string &binlog_name, BinlogPos &binlog_pos, Binlo
 	//tempslave.close_connection();
 }
 
-void DBReader::ReadBinlog(const std::string &binlog_name, BinlogPos binlog_pos, BinlogEventCallback cb)
+void DBReader::ReadBinlog(const std::string &binlog_name, unsigned long binlog_pos, BinlogEventCallback cb)
 {
 	stopped = false;
 	state.setMasterLogNamePos(binlog_name, binlog_pos);
@@ -105,7 +105,7 @@ void DBReader::ReadBinlog(const std::string &binlog_name, BinlogPos binlog_pos, 
 	slave.init();
 	slave.createDatabaseStructure();
 
-	slave.get_remote_binlog(std::bind(&DBReader::ReadBinlogCallback, this));
+	slave.get_remote_binlog([this] { return stopped; });
 }
 
 void DBReader::Stop()
@@ -132,14 +132,12 @@ void DBReader::EventCallback(const slave::RecordSet& event, const std::map<std::
 		case slave::RecordSet::Write:  ev.event = "INSERT"; break;
 		default:                       ev.event = "IGNORE";
 	}
-
 	for (auto fi = filter.begin(), end = filter.end(); fi != end; ++fi) {
 		const auto ri = event.m_row.find(fi->first);
 		if (ri != event.m_row.end()) {
 			ev.row[ fi->second ] = ri->second;
 		}
 	}
-
 	stopped = cb(ev);
 }
 
@@ -155,11 +153,6 @@ void DBReader::XidEventCallback(unsigned int server_id, BinlogEventCallback cb)
 	ev.unix_timestamp = long(time(NULL));
 	ev.event = "IGNORE";
 	stopped = cb(ev);
-}
-
-bool DBReader::ReadBinlogCallback()
-{
-	return stopped != 0;
 }
 
 void DBReader::DumpTablesCallback(
@@ -193,8 +186,7 @@ void DBReader::DumpTablesCallback(
 	}
 }
 
-unsigned DBReader::GetSecondsBehindMaster() const
-{
+unsigned DBReader::GetSecondsBehindMaster() const {
 	return std::max(::time(NULL) - last_event_when, 0L);
 }
 

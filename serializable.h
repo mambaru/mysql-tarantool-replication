@@ -5,21 +5,12 @@
 #include <map>
 #include <sstream>
 #include <boost/any.hpp>
-#include <boost/serialization/serialization.hpp>
-#include <boost/serialization/map.hpp>
 
 namespace replicator {
 
 class SerializableValue {
 private:
-	friend class boost::serialization::access;
-
 	std::string type_id;
-
-	template<class Archive>
-	void serialize(Archive &ar, const unsigned int file_version){
-		ar & type_id & second;
-	}
 
 	void fromAny (const boost::any &v)
 	{
@@ -134,17 +125,8 @@ public:
 };
 
 
-class SerializableBinlogEvent
+struct SerializableBinlogEvent
 {
-private:
-	friend class boost::serialization::access;
-
-	template<class Archive>
-	void serialize(Archive &ar, const unsigned int file_version){
-		ar & binlog_name & binlog_pos & seconds_behind_master & unix_timestamp & database & table & event & row;
-	}
-
-public:
 	std::string binlog_name;
 	unsigned long binlog_pos;
 	unsigned long seconds_behind_master;

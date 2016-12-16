@@ -9,119 +9,64 @@
 namespace replicator {
 
 class SerializableValue {
-private:
-	std::string type_id;
+	private:
+		boost::any value;
 
-	void fromAny (const boost::any &v)
-	{
-		if (v.type() == typeid(std::string)) {
-			type_id = "string";
-			second = boost::any_cast<std::string>(v);
-		} else {
+	public:
+		SerializableValue () {}
+		SerializableValue (const boost::any &value_) : value(value_) {}
+
+		template<typename T>
+		inline SerializableValue& operator= (T value_) {
+			value = boost::any(value_);
+			return *this;
+		}
+
+		inline SerializableValue& operator= (const boost::any& value_) {
+			value = value_;
+			return *this;
+		}
+
+		template<typename T> inline bool is() const {
+			return value.type() == typeid(T);
+		}
+
+		template<typename T> inline T as() const {
+			return boost::any_cast<T>(value);
+		}
+
+		std::string to_string() const {
 			std::ostringstream s;
 
-			if (v.type() == typeid(char)) {
-				type_id = "int";
-				s << (short)boost::any_cast<char>(v);
+			if (is<std::string()>()) {
+				s << as<std::string>();
+			} else if (is<char>()) {
+				s << as<char>();
+			} else if (is<unsigned char>()) {
+				s << as<unsigned char>();
+			} else if (is<short>()) {
+				s << as<short>();
+			} else if (is<unsigned short>()) {
+				s << as<unsigned short>();
+			} else if (is<int>()) {
+				s << as<int>();
+			} else if (is<unsigned int>()) {
+				s << as<unsigned int>();
+			} else if (is<long>()) {
+				s << as<long>();
+			} else if (is<unsigned long>()) {
+				s << as<unsigned long>();
+			} else if (is<long long>()) {
+				s << as<long long>();
+			} else if (is<unsigned long long>()) {
+				s << as<unsigned long long>();
+			} else if (is<float>()) {
+				s << as<float>();
+			} else if (is<double>()) {
+				s << as<double>();
 			}
-			else if (v.type() == typeid(unsigned char)) {
-				type_id = "uint";
-				s << (unsigned short)boost::any_cast<unsigned char>(v);
-			}
-			else if (v.type() == typeid(short)) {
-				type_id = "int";
-				s << boost::any_cast<short>(v);
-			}
-			else if (v.type() == typeid(unsigned short)) {
-				type_id = "uint";
-				s << boost::any_cast<unsigned short>(v);
-			}
-			else if (v.type() == typeid(int)) {
-				type_id = "int";
-				s << boost::any_cast<int>(v);
-			}
-			else if (v.type() == typeid(unsigned int)) {
-				type_id = "uint";
-				s << boost::any_cast<unsigned int>(v);
-			}
-			else if (v.type() == typeid(long)) {
-				type_id = "int";
-				s << boost::any_cast<long>(v);
-			}
-			else if (v.type() == typeid(unsigned long)) {
-				type_id = "uint";
-				s << boost::any_cast<unsigned long>(v);
-			}
-			else if (v.type() == typeid(long long)) {
-				type_id = "int";
-				s << boost::any_cast<long long>(v);
-			}
-			else if (v.type() == typeid(unsigned long long)) {
-				type_id = "uint";
-				s << boost::any_cast<unsigned long long>(v);
-			}
-			else if (v.type() == typeid(float)) {
-				type_id = "float";
-				s << boost::any_cast<float>(v);
-			}
-			else if (v.type() == typeid(double)) {
-				type_id = "double";
-				s << boost::any_cast<double>(v);
-			}
-			else {
-				type_id = "null";
-			}
-			second = s.str();
+			return s.str();
 		}
-	}
-
-public:
-	std::string second;
-
-	SerializableValue () {}
-
-	SerializableValue (const boost::any &v) { fromAny(v); }
-
-	SerializableValue& operator= (const boost::any &v) { fromAny(v); return *this; }
-
-	boost::any operator *() const {
-		if (type_id == "string") {
-			return boost::any(second);
-		}
-
-		std::istringstream s(second);
-
-		if (type_id == "int") {
-			long long val;
-			s >> val;
-			return boost::any(val);
-		}
-		if (type_id == "uint") {
-			unsigned long long val;
-			s >> val;
-			return boost::any(val);
-		}
-		if (type_id == "float") {
-			float val;
-			s >> val;
-			return boost::any(val);
-		}
-		if (type_id == "double") {
-			double val;
-			s >> val;
-			return boost::any(val);
-		}
-
-		return boost::any();
-	}
-
-	const std::string& value_string() const {
-		return second;
-	}
-
-	const std::string& get_type_id() const {
-		return type_id;
-	}
 };
 
 

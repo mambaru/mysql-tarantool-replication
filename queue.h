@@ -33,10 +33,12 @@ template<typename T> class Queue
 			std::unique_lock<std::mutex> lock(mutex);
 
 			if (!queue.empty() || cv1.wait_for(lock, timeout, [this] { return !queue.empty(); })) {
-				for (unsigned cnt = queue.size() < limit_ ? queue.size() : limit_; cnt; cnt--) {
-					cb(queue.front());
+				bool predicate;
+				unsigned cnt = queue.size() < limit_ ? queue.size() : limit_;
+				do {
+					predicate = cb(queue.front());
 					queue.pop_front();
-				}
+				} while (!predicate && --cnt);
 			}
 
 			lock.unlock();

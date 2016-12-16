@@ -205,19 +205,17 @@ static void init(YAML::Node& cfg)
 					unsigned index = itrn->first.as<unsigned>();
 					std::string type = itf->first.as<std::string>();
 					const YAML::Node& value = itf->second;
-					boost::any anyv;
 
-					if (type == "string") {
-						anyv = value.as<std::string>();
+					if (type == "str" || type == "string") {
+						rn_[ index ] = value.as<std::string>();
 					} else if (type == "unsigned") {
-						anyv = value.as<unsigned long long>();
-					} else if (type == "integer") {
-						anyv = value.as<long long>();
+						rn_[ index ] = value.as<unsigned long long>();
+					} else if (type == "int" || type == "integer") {
+						rn_[ index ] = value.as<long long>();
 					} else {
 						std::cerr << "Config error: unknown type for non-null value for column " << index << std::endl;
 						exit(EXIT_FAILURE);
 					}
-					rn_[ index ] = anyv;
 				}
 			}
 		}

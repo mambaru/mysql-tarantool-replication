@@ -80,7 +80,7 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 		SerializableBinlogEvent ev;
 		ev.binlog_name = binlog_name;
 		ev.binlog_pos = binlog_pos;
-		ev.seconds_behind_master = GetSecondsBehindMaster();
+		// ev.seconds_behind_master = GetSecondsBehindMaster();
 		ev.unix_timestamp = long(time(NULL));
 		ev.event = "IGNORE";
 		stopped = cb(ev);
@@ -121,7 +121,7 @@ void DBReader::EventCallback(const slave::RecordSet& event, const std::map<std::
 	SerializableBinlogEvent ev;
 	ev.binlog_name = state.getMasterLogName();
 	ev.binlog_pos = state.getMasterLogPos();
-	ev.seconds_behind_master = GetSecondsBehindMaster();
+	// ev.seconds_behind_master = GetSecondsBehindMaster();
 	ev.unix_timestamp = long(time(NULL));
 	ev.database = event.db_name;
 	ev.table = event.tbl_name;
@@ -149,7 +149,7 @@ void DBReader::XidEventCallback(unsigned int server_id, BinlogEventCallback cb)
 	SerializableBinlogEvent ev;
 	ev.binlog_name = state.getMasterLogName();
 	ev.binlog_pos = state.getMasterLogPos();
-	ev.seconds_behind_master = GetSecondsBehindMaster();
+	// ev.seconds_behind_master = GetSecondsBehindMaster();
 	ev.unix_timestamp = long(time(NULL));
 	ev.event = "IGNORE";
 	stopped = cb(ev);
@@ -168,7 +168,7 @@ void DBReader::DumpTablesCallback(
 	ev.database = db_name;
 	ev.table = tbl_name;
 	ev.event = "INSERT";
-	ev.seconds_behind_master = GetSecondsBehindMaster();
+	// ev.seconds_behind_master = GetSecondsBehindMaster();
 	ev.unix_timestamp = long(time(NULL));
 
 	for (const auto& it : filter) {

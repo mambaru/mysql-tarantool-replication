@@ -34,7 +34,7 @@ static DBReader *dbreader = NULL;
 
 static void sigint_handler(int sig);
 
-static Queue<SerializableBinlogEvent> queue(100);
+static Queue<SerializableBinlogEvent> queue(50);
 
 // ===============
 
@@ -42,28 +42,20 @@ static void tpwriter_worker()
 {
 	while (!is_term)
 	{
-		if (!tpwriter->Connect()) continue;
+		while (!tpwriter->Connect());
 
-		// send initial binlog position to the main thread
+		// send initial binlog position to the db thread
 		try {
-			if (!tpwriter->ReadBinlogPos(binlog_name, binlog_pos)) {
-				tpwriter->Disconnect();
-				continue;
-			}
-
+			tpwriter->ReadBinlogPos(binlog_name, binlog_pos);
 			reset = true;
 
-			while (!is_term)
-			{
-				queue.fetch(std::bind(&TPWriter::BinlogEventCallback, tpwriter, _1), std::chrono::milliseconds(1000), 100);
-				tpwriter->Sync();
+			const std::chrono::milliseconds timeout(1000);
+			const auto cb_fetch = std::bind(&TPWriter::BinlogEventCallback, tpwriter, _1);
 
-				if (!is_term && tpwriter->ReadReply() < 0) {
-					const auto code = tpwriter->GetReplyCode();
-					if (code) {
-						std::cerr << "Tarantool error: " << tpwriter->GetReplyErrorMessage() << " (code: " << code << ")" << std::endl;
-					}
-				}
+			while (!is_term) {
+				queue.try_fetch(cb_fetch, timeout);
+				tpwriter->Sync();
+				tpwriter->RecvAll();
 			}
 		}
 		catch (std::range_error& ex) {

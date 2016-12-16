@@ -1,4 +1,5 @@
 #include <iostream>
+#include <sstream>
 #include <sys/time.h>
 
 #include <tarantool/tarantool.h>
@@ -31,14 +32,11 @@ TPWriter::TPWriter(
 	binlog_key(binlog_key),
 	binlog_name(""),
 	binlog_pos(0),
-	seconds_behind_master(0),
 	connect_retry(connect_retry),
 	sync_retry(sync_retry),
 	next_connect_attempt(0),
 	next_sync_attempt(0),
-	next_ping_attempt(0),
-	reply_server_code(0),
-	reply_error_msg("")
+	next_ping_attempt(0)
 {
 	::tnt_net(&sess);
 
@@ -61,8 +59,7 @@ bool TPWriter::Connect()
 {
 	// connect to tarantool
 	if (::time(NULL) < next_connect_attempt) {
-		::sleep(1);
-		return false;
+		::sleep(next_connect_attempt - ::time(NULL));
 	}
 	if (::tnt_connect(&sess) < 0) {
 		std::cerr << "Could not connect to Tarantool: " << ::tnt_strerror(&sess) << std::endl;
@@ -82,7 +79,7 @@ TPWriter::~TPWriter()
 	::tnt_stream_free(&sess);
 }
 
-bool TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos)
+void TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos)
 {
 	// read initial binlog pos
 	int64_t sync;
@@ -102,36 +99,21 @@ bool TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos
 	}
 
 	__tnt_reply re;
-	do {
-		const int r = Recv(&re);
-		if (r == 0) {
-			break;
-		}
-		else if (r < 0 && reply_server_code) {
-			std::cerr << "ReadBinlogPos Tarantool error: " << reply_error_msg << " (code: " << reply_server_code << ")" << std::endl;
-			return false;
-		}
-		else {
-			std::cerr << "ReadBinlogPos error: no replies, weird" << std::endl;
-			return false;
-		}
-	} while (true);
+	while (!Recv(&re));
 
 	if ((&re)->sync != sync) {
-		std::cerr << "ReadBinlogPos error: not requested reply" << std::endl;
-		return false;
+		throw std::runtime_error("ReadBinlogPos error: not requested reply");
 	}
-
 	do {
-		const char *data = (&re)->data;
+		this->binlog_name = binlog_name = "";
+		this->binlog_pos = binlog_pos = 0;
 
+		const char *data = (&re)->data;
 		// result rows
 		if (mp_unlikely(mp_typeof(*data) != MP_ARRAY)) break;
 		if (mp_unlikely(mp_decode_array(&data) == 0)) {
 			// no binlog created yet
-			this->binlog_name = binlog_name = "";
-			this->binlog_pos = binlog_pos = 0;
-			return true;
+			return;
 		}
 
 		// row
@@ -154,13 +136,11 @@ bool TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos
 
 		next_ping_attempt = Milliseconds() + TPWriter::PING_TIMEOUT;
 
-		return true;
+		return;
+
 	} while (0);
 
-	std::cerr << "binlog record format error" << std::endl;
-	this->binlog_name = binlog_name = "";
-	this->binlog_pos = binlog_pos = 0;
-	return true;
+	std::cerr << "ReadBinlogPos error: bad state record format" << std::endl;
 }
 
 void TPWriter::Disconnect()
@@ -168,24 +148,16 @@ void TPWriter::Disconnect()
 	::tnt_close(&sess);
 }
 
-inline void TPWriter::Ping()
-{
-	__tnt_request req;
-	::tnt_request_ping(&req);
-	Send(&req);
-}
-
 void TPWriter::AddTable(
-	const std::string &db,
-	const std::string &table,
+	const std::string& db,
+	const std::string& table,
 	const unsigned space,
 	const Tuple &keys,
-	const std::string &insert_call,
-	const std::string &update_call,
-	const std::string &delete_call
+	const std::string& insert_call,
+	const std::string& update_call,
+	const std::string& delete_call
 ) {
-	TableMap &d = dbs[db];
-	TableSpace &s = d[table];
+	TableSpace& s = dbs[db][table];
 	s.space = space;
 	s.keys = keys;
 	s.insert_call = insert_call;
@@ -193,48 +165,33 @@ void TPWriter::AddTable(
 	s.delete_call = delete_call;
 }
 
-inline void TPWriter::SaveBinlogPos()
-{
-	__tnt_object tuple;
-	::tnt_object_add_array(&tuple, 3);
-	::tnt_object_add_uint(&tuple, binlog_key);
-	::tnt_object_add_str(&tuple, binlog_name.c_str(), binlog_name.length());
-	::tnt_object_add_uint(&tuple, binlog_pos);
-	::tnt_object_container_close(&tuple);
-
-	__tnt_request req;
-	::tnt_request_replace(&req);
-	::tnt_request_set_space(&req, binlog_key_space);
-	::tnt_request_set_tuple(&req, &tuple);
-
-	Send(&req);
-}
-
-bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
+void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 {
 	// spacial case event "IGNORE", which only updates binlog position
 	// but doesn't modify any table data
-	if (ev.event == "IGNORE")
-		return false;
-
-	if (ev.binlog_name != "") {
-		binlog_name = ev.binlog_name;
-		binlog_pos = ev.binlog_pos;
+	if (ev.event == "IGNORE") {
+		return;
 	}
 
-	const auto idb = dbs.find(ev.database);
-	if (idb == dbs.end())
-		return false;
+	const TableSpace& ts = dbs.at(ev.database).at(ev.table);
 
-	const TableMap &tm = idb->second;
-	const auto itm = tm.find(ev.table);
-	if (itm == tm.end())
-		return false;
+	// check if doing same key as last time
+	static std::string prev_key;
+	std::string curnt_key;
 
-	const TableSpace &ts = itm->second;
+	for (const auto i : ts.keys) {
+		curnt_key += ev.row.at(i).to_string();
+	}
+	if (prev_key == curnt_key) {
+		// sync first
+		RecvAll();
+	} else {
+		prev_key = curnt_key;
+	}
 
-	const auto irn = replace_null.find(ts.space);
 	const std::map<unsigned, SerializableValue>* replace_null_;
+	const auto irn = replace_null.find(ts.space);
+
 	if (irn != replace_null.end()) {
 		replace_null_ = &irn->second;
 	} else {
@@ -256,7 +213,9 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 			} else if (v.is<unsigned long long>()) {
 				::tnt_object_add_uint(o, v.as<unsigned long long>());
 			} else {
-				throw std::range_error(std::string("Typecasting error for non-null value for column: " + index));
+				std::ostringstream s;
+				s << "Typecasting error for non-null value for column: " << index;
+				throw std::range_error(s.str());
 			}
 			return;
 
@@ -299,7 +258,9 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 			}
 		}
 		catch (boost::bad_any_cast &ex) {
-			throw std::range_error(std::string("Typecasting error for column: ") + ex.what());
+			std::ostringstream s;
+			s << "Typecasting error for column: " << ex.what();
+			throw std::range_error(s.str());
 		}
 	};
 
@@ -419,22 +380,15 @@ bool TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 			make_call(ts.update_call);
 		}
 	} else {
-		throw std::range_error("Uknown binlog event: " + ev.event);
+		std::ostringstream s;
+		s << "Uknown binlog event: " << ev.event;
+		throw std::range_error(s.str());
 	}
 
-	// check if doing same key as last time
-	// and do sync, if true
-	static std::string prev_key;
-	std::string curnt_key;
-
-	for (const auto i : ts.keys)
-		curnt_key += ev.row.at(i).to_string();
-
-	if (prev_key == curnt_key)
-		return true;
-
-	prev_key = curnt_key;
-	return false;
+	if (ev.binlog_name != "") {
+		binlog_name = ev.binlog_name;
+		binlog_pos = ev.binlog_pos;
+	}
 }
 
 // blocking send
@@ -448,93 +402,91 @@ int64_t TPWriter::Send(struct ::tnt_request *req)
 	char *buf = TNT_SBUF_DATA(&sbuf);
 
 	while (len > 0) {
-		const ssize_t r = sess.write(&sess, buf, len);
-		if (r < 0) {
+		const ssize_t sent = sess.write(&sess, buf, len);
+		if (sent < 0) {
 			const int _errno = ::tnt_errno(&sess);
 			if (_errno == EWOULDBLOCK || _errno == EAGAIN) {
 				continue;
 			}
 			::tnt_stream_free(&sbuf);
-			throw std::runtime_error("Send failed: " + std::string(::tnt_strerror(&sess)));
+			std::ostringstream s;
+			s << "Send failed: " << ::tnt_strerror(&sess);
+			throw std::runtime_error(s.str());
 		}
-		len -= r;
-		buf += r;
+		len -= sent;
+		buf += sent;
 	}
 
 	::tnt_stream_free(&sbuf);
 	return sync;
 }
 
-bool TPWriter::Sync(bool force)
+void TPWriter::Sync()
 {
-	if (next_ping_attempt == 0 || Milliseconds() > next_ping_attempt) {
+	bool force = false;
+
+	if (Milliseconds() > next_ping_attempt) {
 		force = true;
+
+		__tnt_request req;
+		::tnt_request_ping(&req);
+		Send(&req);
+
 		next_ping_attempt = Milliseconds() + TPWriter::PING_TIMEOUT;
-		Ping();
 	}
-	if (force || next_sync_attempt == 0 || Milliseconds() >= next_sync_attempt) {
-		SaveBinlogPos();
+	if (force || Milliseconds() >= next_sync_attempt) {
+		__tnt_object tuple;
+		::tnt_object_add_array(&tuple, 3);
+		::tnt_object_add_uint(&tuple, binlog_key);
+		::tnt_object_add_str(&tuple, binlog_name.c_str(), binlog_name.length());
+		::tnt_object_add_uint(&tuple, binlog_pos);
+		::tnt_object_container_close(&tuple);
+
+		__tnt_request req;
+		::tnt_request_replace(&req);
+		::tnt_request_set_space(&req, binlog_key_space);
+		::tnt_request_set_tuple(&req, &tuple);
+
+		Send(&req);
+
 		next_sync_attempt = Milliseconds() + sync_retry;
 	}
-	return true;
 }
 
 // non-blocking receive
-int TPWriter::Recv(struct ::tnt_reply *re)
+bool TPWriter::Recv(struct ::tnt_reply *re)
 {
-	const int r = sess.read_reply(&sess, re);
+	const int result = sess.read_reply(&sess, re);
 
-	if (r == 0) {
+	if (result == 0) {
 		if (re->code) {
-			reply_server_code = re->code;
-			reply_error_msg = std::move(std::string(re->error, re->error_end - re->error));
-			return -1;
-		} else if (reply_server_code) {
-			reply_server_code = 0;
-			reply_error_msg = "";
+			std::ostringstream s;
+			s << "Tarantool error: " << std::string(re->error, re->error_end - re->error) << " (code: " << re->code << ")";
+			throw std::range_error(s.str());
 		}
-		return r;
+		return true;
 	}
-	if (r < 0) {
+	else if (result < 0) {
 		const int _errno = ::tnt_errno(&sess);
 		if (_errno == EWOULDBLOCK || _errno == EAGAIN) {
-			return r;
+			return false;
 		}
-		throw std::runtime_error("Recv failed: " + std::string(::tnt_strerror(&sess)));
+		std::ostringstream s;
+		s << "Recv failed: " << ::tnt_strerror(&sess);
+		throw std::runtime_error(s.str());
 	}
-	return r;
+	// no complete replies in buffer
+	return false;
 }
 
-int TPWriter::ReadReply()
+void TPWriter::RecvAll()
 {
-	int r;
+	bool result;
 	do {
 		__tnt_reply re;
-		r = Recv(&re);
+		result = Recv(&re);
 	}
-	while (r == 0);
-	return r;
-}
-
-uint64_t TPWriter::GetReplyCode() const
-{
-	return reply_server_code;
-}
-
-const std::string& TPWriter::GetReplyErrorMessage() const
-{
-	return reply_error_msg;
-}
-
-uint64_t TPWriter::Milliseconds()
-{
-	struct timeval tp;
-	::gettimeofday( &tp, NULL );
-	if (!secbase) {
-		secbase = tp.tv_sec;
-		return tp.tv_usec / 1000;
-	}
-	return (uint64_t)(tp.tv_sec - secbase)*1000 + tp.tv_usec / 1000;
+	while (result);
 }
 
 }

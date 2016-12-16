@@ -74,7 +74,7 @@ struct SerializableBinlogEvent
 {
 	std::string binlog_name;
 	unsigned long binlog_pos;
-	unsigned long seconds_behind_master;
+	// unsigned long seconds_behind_master;
 	unsigned long unix_timestamp;
 	std::string database;
 	std::string table;

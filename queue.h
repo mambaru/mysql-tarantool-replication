@@ -12,7 +12,7 @@ template<typename T> class Queue
 	public:
 		Queue(const unsigned limit_) : limit(limit_) {}
 
-		T pop()
+		inline T pop()
 		{
 			std::unique_lock<std::mutex> lock(mutex);
 
@@ -28,24 +28,32 @@ template<typename T> class Queue
 			return item;
 		}
 
-		void fetch(const std::function<bool (T&)>& cb, const std::chrono::milliseconds timeout, const unsigned limit_)
+		void try_fetch(const std::function<void (T&)>& cb, const std::chrono::milliseconds timeout)
 		{
 			std::unique_lock<std::mutex> lock(mutex);
 
 			if (!queue.empty() || cv1.wait_for(lock, timeout, [this] { return !queue.empty(); })) {
-				bool predicate;
-				unsigned cnt = queue.size() < limit_ ? queue.size() : limit_;
+				unsigned cnt = queue.size();
 				do {
-					predicate = cb(queue.front());
+					T item = queue.front();
 					queue.pop_front();
-				} while (!predicate && --cnt);
+					lock.unlock();
+					cv2.notify_all();
+
+					cb(item);
+
+					if (--cnt) {
+						lock.lock();
+						continue;
+					}
+				} while (false);
 			}
 
 			lock.unlock();
 			cv2.notify_all();
 		}
 
-		void push(const T& item)
+		inline void push(const T& item)
 		{
 			std::unique_lock<std::mutex> lock(mutex);
 
@@ -58,9 +66,14 @@ template<typename T> class Queue
 			cv1.notify_one();
 		}
 
+		inline unsigned size() const {
+			// std::lock_guard<std::mutex> lock(mutex);
+			return queue.size();
+		}
+
 	private:
 		std::deque<T> queue;
-		std::mutex mutex;
+		mutable std::mutex mutex;
 		std::condition_variable cv1;
 		std::condition_variable cv2;
 		const unsigned limit;

@@ -165,22 +165,22 @@ void TPWriter::AddTable(
 	s.delete_call = delete_call;
 }
 
-void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
+void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 {
 	// spacial case event "IGNORE", which only updates binlog position
 	// but doesn't modify any table data
-	if (ev.event == "IGNORE") {
+	if (ev->event == "IGNORE") {
 		return;
 	}
 
-	const TableSpace& ts = dbs.at(ev.database).at(ev.table);
+	const TableSpace& ts = dbs.at(ev->database).at(ev->table);
 
 	// check if doing same key as last time
 	static std::string prev_key;
 	std::string curnt_key;
 
 	for (const auto i : ts.keys) {
-		curnt_key += ev.row.at(i).to_string();
+		curnt_key += ev->row.at(i).to_string();
 	}
 	if (prev_key == curnt_key) {
 		// sync first
@@ -267,7 +267,7 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 	const auto add_key = [&] (struct ::tnt_stream *o) -> void {
 		::tnt_object_add_array(o, ts.keys.size());
 		for (const auto i : ts.keys) {
-			add_value(o, i, ev.row.at(i));
+			add_value(o, i, ev->row.at(i));
 		}
 		::tnt_object_container_close(o);
 	};
@@ -277,7 +277,7 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 		unsigned i_nil = 0;
 		// ev.row may have gaps, since it's not an array but a map
 		// so fill the gaps to match columns count
-		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
+		for (auto it = ev->row.begin(), end = ev->row.end(); it != end; ++it) {
 			// fill gaps
 			for (; i_nil < it->first; ++i_nil) add_nil_with_replace(o, i_nil);
 
@@ -292,7 +292,7 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 
 	const auto add_ops = [&] (struct ::tnt_stream *o) -> void {
 		::tnt_update_container_reset(o);
-		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
+		for (auto it = ev->row.begin(), end = ev->row.end(); it != end; ++it) {
 			__tnt_object sval;
 			add_value(&sval, it->first, it->second);
 			::tnt_update_assign(o, it->first, &sval);
@@ -303,9 +303,9 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 	const auto make_call = [&] (const std::string& func_name) -> void {
 		__tnt_object args;
 		::tnt_object_add_array(&args, 1);
-		::tnt_object_add_map(&args, ev.row.size());
+		::tnt_object_add_map(&args, ev->row.size());
 
-		for (auto it = ev.row.begin(), end = ev.row.end(); it != end; ++it) {
+		for (auto it = ev->row.begin(), end = ev->row.end(); it != end; ++it) {
 			::tnt_object_add_uint(&args, it->first);
 			add_value(&args, it->first, it->second);
 		}
@@ -321,7 +321,7 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 	};
 
 	// add Tarantool request
-	if (ev.event == "DELETE") {
+	if (ev->event == "DELETE") {
 		if (ts.delete_call.empty()) {
 			__tnt_object key;
 			add_key(&key);
@@ -335,7 +335,7 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 		} else {
 			make_call(ts.delete_call);
 		}
-	} else if (ev.event == "INSERT") {
+	} else if (ev->event == "INSERT") {
 		if (ts.insert_call.empty()) {
 			// __tnt_object tuple;
 			// add_tuple(&tuple);
@@ -361,7 +361,7 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 		} else {
 			make_call(ts.insert_call);
 		}
-	} else if (ev.event == "UPDATE") {
+	} else if (ev->event == "UPDATE") {
 		if (ts.update_call.empty()) {
 			__tnt_object key;
 			add_key(&key);
@@ -381,13 +381,13 @@ void TPWriter::BinlogEventCallback(const SerializableBinlogEvent& ev)
 		}
 	} else {
 		std::ostringstream s;
-		s << "Uknown binlog event: " << ev.event;
+		s << "Uknown binlog event: " << ev->event;
 		throw std::range_error(s.str());
 	}
 
-	if (ev.binlog_name != "") {
-		binlog_name = ev.binlog_name;
-		binlog_pos = ev.binlog_pos;
+	if (ev->binlog_name != "") {
+		binlog_name = ev->binlog_name;
+		binlog_pos = ev->binlog_pos;
 	}
 }
 

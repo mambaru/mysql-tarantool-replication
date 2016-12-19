@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <sstream>
+#include <memory>
 #include <boost/any.hpp>
 
 namespace replicator {
@@ -81,6 +82,8 @@ struct SerializableBinlogEvent
 	std::string event;
 	std::map<unsigned, SerializableValue> row;
 };
+
+typedef std::unique_ptr<SerializableBinlogEvent> SerializableBinlogEventPtr;
 
 } // replicator
 

@@ -77,13 +77,13 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 
 	// send binlog position update event
 	if (!stopped) {
-		SerializableBinlogEvent ev;
-		ev.binlog_name = binlog_name;
-		ev.binlog_pos = binlog_pos;
-		// ev.seconds_behind_master = GetSecondsBehindMaster();
-		ev.unix_timestamp = long(time(NULL));
-		ev.event = "IGNORE";
-		stopped = cb(ev);
+		SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
+		ev->binlog_name = binlog_name;
+		ev->binlog_pos = binlog_pos;
+		// ev->seconds_behind_master = GetSecondsBehindMaster();
+		ev->unix_timestamp = long(time(NULL));
+		ev->event = "IGNORE";
+		stopped = cb(std::move(ev));
 	}
 
 	//tempslave.close_connection();
@@ -118,27 +118,27 @@ void DBReader::EventCallback(const slave::RecordSet& event, const std::map<std::
 {
 	last_event_when = event.when;
 
-	SerializableBinlogEvent ev;
-	ev.binlog_name = state.getMasterLogName();
-	ev.binlog_pos = state.getMasterLogPos();
-	// ev.seconds_behind_master = GetSecondsBehindMaster();
-	ev.unix_timestamp = long(time(NULL));
-	ev.database = event.db_name;
-	ev.table = event.tbl_name;
+	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
+	ev->binlog_name = state.getMasterLogName();
+	ev->binlog_pos = state.getMasterLogPos();
+	// ev->seconds_behind_master = GetSecondsBehindMaster();
+	ev->unix_timestamp = long(time(NULL));
+	ev->database = event.db_name;
+	ev->table = event.tbl_name;
 
 	switch (event.type_event) {
-		case slave::RecordSet::Delete: ev.event = "DELETE"; break;
-		case slave::RecordSet::Update: ev.event = "UPDATE"; break;
-		case slave::RecordSet::Write:  ev.event = "INSERT"; break;
-		default:                       ev.event = "IGNORE";
+		case slave::RecordSet::Delete: ev->event = "DELETE"; break;
+		case slave::RecordSet::Update: ev->event = "UPDATE"; break;
+		case slave::RecordSet::Write:  ev->event = "INSERT"; break;
+		default:                       ev->event = "IGNORE";
 	}
 	for (auto fi = filter.begin(), end = filter.end(); fi != end; ++fi) {
 		const auto ri = event.m_row.find(fi->first);
 		if (ri != event.m_row.end()) {
-			ev.row[ fi->second ] = ri->second;
+			ev->row[ fi->second ] = ri->second;
 		}
 	}
-	stopped = cb(ev);
+	stopped = cb(std::move(ev));
 }
 
 void DBReader::XidEventCallback(unsigned int server_id, BinlogEventCallback cb)
@@ -146,13 +146,13 @@ void DBReader::XidEventCallback(unsigned int server_id, BinlogEventCallback cb)
 	last_event_when = ::time(NULL);
 
 	// send binlog position update event
-	SerializableBinlogEvent ev;
-	ev.binlog_name = state.getMasterLogName();
-	ev.binlog_pos = state.getMasterLogPos();
-	// ev.seconds_behind_master = GetSecondsBehindMaster();
-	ev.unix_timestamp = long(time(NULL));
-	ev.event = "IGNORE";
-	stopped = cb(ev);
+	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
+	ev->binlog_name = state.getMasterLogName();
+	ev->binlog_pos = state.getMasterLogPos();
+	// ev->seconds_behind_master = GetSecondsBehindMaster();
+	ev->unix_timestamp = long(time(NULL));
+	ev->event = "IGNORE";
+	stopped = cb(std::move(ev));
 }
 
 void DBReader::DumpTablesCallback(
@@ -162,27 +162,27 @@ void DBReader::DumpTablesCallback(
 	const nanomysql::fields_t& fields,
 	BinlogEventCallback cb
 ) {
-	SerializableBinlogEvent ev;
-	ev.binlog_name = "";
-	ev.binlog_pos = 0;
-	ev.database = db_name;
-	ev.table = tbl_name;
-	ev.event = "INSERT";
-	// ev.seconds_behind_master = GetSecondsBehindMaster();
-	ev.unix_timestamp = long(time(NULL));
+	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
+	ev->binlog_name = "";
+	ev->binlog_pos = 0;
+	ev->database = db_name;
+	ev->table = tbl_name;
+	ev->event = "INSERT";
+	// ev->seconds_behind_master = GetSecondsBehindMaster();
+	ev->unix_timestamp = long(time(NULL));
 
 	for (const auto& it : filter) {
 		slave::PtrField ptr_field = it.second;
 		const auto& field = fields.at(ptr_field->field_name);
 		if (field.is_null) {
-			ev.row[ it.first ] = boost::any();
+			ev->row[ it.first ] = boost::any();
 		} else {
 			ptr_field->unpack_str(field.data);
-			ev.row[ it.first ] = ptr_field->field_data;
+			ev->row[ it.first ] = ptr_field->field_data;
 		}
 	}
 	if (!stopped) {
-		stopped = cb(ev);
+		stopped = cb(std::move(ev));
 	}
 }
 

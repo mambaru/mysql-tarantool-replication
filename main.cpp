@@ -34,7 +34,7 @@ static DBReader *dbreader = NULL;
 
 static void sigint_handler(int sig);
 
-static Queue<SerializableBinlogEvent> queue(50);
+static Queue<SerializableBinlogEventPtr> queue(50);
 
 // ===============
 
@@ -48,15 +48,12 @@ static void tpwriter_worker()
 		try {
 			tpwriter->ReadBinlogPos(binlog_name, binlog_pos);
 			reset = true;
-
 			const std::chrono::milliseconds timeout(1000);
-			const auto cb_fetch = std::bind(&TPWriter::BinlogEventCallback, tpwriter, _1);
 
 			while (!is_term) {
-				// for (unsigned cnt = queue.size(); cnt > 0; --cnt) {
-				// 	tpwriter->BinlogEventCallback(queue.pop());
-				// }
-				queue.try_fetch(cb_fetch, timeout);
+				for (unsigned cnt = queue.wait(timeout); cnt > 0; --cnt) {
+					tpwriter->BinlogEventCallback(queue.pop());
+				}
 				tpwriter->Sync();
 				tpwriter->RecvAll();
 			}
@@ -78,13 +75,13 @@ static void tpwriter_worker()
 
 // ====================
 
-static bool dbread_callback(const SerializableBinlogEvent &ev)
+static bool dbread_callback(SerializableBinlogEventPtr&& ev)
 {
 	if (is_term || reset) {
 		return true;
 	}
 
-	queue.push(ev);
+	queue.push(std::forward<SerializableBinlogEventPtr>(ev));
 	return false;
 }
 

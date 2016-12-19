@@ -27,7 +27,7 @@ class TPWriter
 		void Disconnect();
 		void ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos);
 		void Sync();
-		void BinlogEventCallback(const SerializableBinlogEvent& ev);
+		void BinlogEventCallback(SerializableBinlogEventPtr&& ev);
 		void RecvAll();
 
 		typedef std::vector<unsigned> Tuple;

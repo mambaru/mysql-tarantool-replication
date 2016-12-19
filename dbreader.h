@@ -14,7 +14,7 @@
 
 namespace replicator {
 
-typedef std::function<bool (const SerializableBinlogEvent &ev)> BinlogEventCallback;
+typedef std::function<bool (SerializableBinlogEventPtr&&)> BinlogEventCallback;
 
 struct DBTable
 {

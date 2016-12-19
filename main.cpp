@@ -53,6 +53,9 @@ static void tpwriter_worker()
 			const auto cb_fetch = std::bind(&TPWriter::BinlogEventCallback, tpwriter, _1);
 
 			while (!is_term) {
+				// for (unsigned cnt = queue.size(); cnt > 0; --cnt) {
+				// 	tpwriter->BinlogEventCallback(queue.pop());
+				// }
 				queue.try_fetch(cb_fetch, timeout);
 				tpwriter->Sync();
 				tpwriter->RecvAll();

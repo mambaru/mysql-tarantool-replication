@@ -3,24 +3,27 @@ mysql:
     port: 3306
     user: tarantool
     password: tarant00l
-    connect_retry: 15
+    connect_retry: 15 # seconds
 
 tarantool:
     host: 10.5.4.248:5000
     user: ""
     password: ""
-    binlog_pos_space: 99
+    binlog_pos_space: 512
     binlog_pos_key: 0
-    connect_retry: 15
-    sync_retry: 1000
+    connect_retry: 15 # seconds
+    sync_retry: 1000 # milliseconds
 
 mappings:
+      # Первая встреченная в конфиге таблица считается основной для спейса,
+      # удаление записи в ней вызовет удаление записи и в Tarantool'е.
+      # Удаление в следующих таблицах с таким-же id спейса удаления записи в Tarantool'е не вызовет,
+      # вместо этого все поля будут забиты null'ами (с подстановкой, см. ниже)
     - database: Monamour2
       table: User
       columns: [ oid, email, login, prefix_id, confirmed, password, secret ]
-      space: 100
+      space: 513
       key_fields: [ 0 ]
-      dump: true
       # insert_call: function_name
       # update_call: function_name
       # delete_call: function_name
@@ -28,37 +31,32 @@ mappings:
     - database: Monamour2
       table: AnketaMini
       columns: [ oid, package_id, birthdate, country_id, region_id, city_id, metro_id, gender, orientation, lookfor, age, iam, target, status, system_status, language_id, partner_id, type, type2, type3, type4, search_mode, changed, created, updated, to_vip_status, theme_id ]
-      space: 100
+      space: 513
       key_fields: [ 0 ]
-      dump: true
 
     - database: Monamour2
       table: AnketaNamesDescr
       columns: [ oid, name ]
-      space: 100
+      space: 513
       key_fields: [ 0 ]
-      dump: true
 
     - database: Monamour2
       table: DefaultPhotos
       columns: [ anketa_id, oid, platform_id, extension, small_face, updated, moderated, huge_adult, rating_id, album_id, width, height, photo_params ]
-      space: 100
+      space: 513
       key_fields: [ 0 ]
-      dump: true
 
     - database: Monamour2
       table: RealUser_Phone
       columns: [ anketa_id, number ]
-      space: 100
+      space: 513
       key_fields: [ 0 ]
-      dump: true
 
     - database: Monamour2
       table: AnketaCounter
       columns: [anketa_id, photos_active, photos_adult ]
-      space: 100
+      space: 513
       key_fields: [ 0 ]
-      dump: true
 
 spaces:
     # Tarantool не умеет вставлять null'ы в поля, по которым есть индекс, а также при upsert'е зачем-то
@@ -67,7 +65,7 @@ spaces:
     # приходится дополнять null'ами, чтобы количество полей было всегда одинаковым.
     #
     # column_id: { (string|integer|unsigned): value }
-    100:
+    513:
         replace_null:
             1: { string: "" }
             2: { string: "" }

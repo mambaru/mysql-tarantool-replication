@@ -1,11 +1,20 @@
 #include <iostream>
 #include <sstream>
+
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include <tarantool/tarantool.h>
 #include <tarantool/tnt_net.h>
 #include <tarantool/tnt_opt.h>
 #include <msgpuck.h>
+extern "C" {
+#include <tarantool/tnt_io.h>
+}
 
 #include <boost/any.hpp>
 
@@ -17,32 +26,30 @@ namespace replicator {
 const std::string TPWriter::empty_call("");
 
 TPWriter::TPWriter(
-	const std::string &host,
-	const std::string &user,
-	const std::string &password,
-	uint32_t binlog_key_space,
-	uint32_t binlog_key,
-	unsigned connect_retry,
-	unsigned sync_retry
+	const std::string& host_,
+	const std::string& user_,
+	const std::string& password_,
+	const uint32_t binlog_key_space_,
+	const unsigned binlog_key_,
+	const unsigned connect_retry_,
+	const unsigned sync_retry_
 ) :
-	host(host),
-	user(user),
-	password(password),
-	binlog_key_space(binlog_key_space),
-	binlog_key(binlog_key),
+	host(host_),
+	user(user_),
+	password(password_),
+	binlog_key_space(binlog_key_space_),
+	binlog_key(binlog_key_),
+	connect_retry(connect_retry_),
+	sync_retry(sync_retry_),
 	binlog_name(""),
 	binlog_pos(0),
-	connect_retry(connect_retry),
-	sync_retry(sync_retry),
 	next_connect_attempt(0),
 	next_sync_attempt(0),
 	next_ping_attempt(0)
 {
-	::tnt_net(&sess);
-
 	::tnt_set(&sess, ::TNT_OPT_URI, host.c_str());
 	::tnt_set(&sess, ::TNT_OPT_SEND_BUF, 0);
-	::tnt_set(&sess, ::TNT_OPT_RECV_BUF, 16 * 1024 * 1024);
+	::tnt_set(&sess, ::TNT_OPT_RECV_BUF, 0);
 
 	::timeval tmout;
 	auto make_timeout = [&tmout] (const unsigned t) -> ::timeval* {
@@ -51,7 +58,7 @@ TPWriter::TPWriter(
 		return &tmout;
 	};
 
-	::tnt_set(&sess, ::TNT_OPT_TMOUT_RECV, make_timeout(100));
+	::tnt_set(&sess, ::TNT_OPT_TMOUT_RECV, make_timeout(10000));
 	::tnt_set(&sess, ::TNT_OPT_TMOUT_SEND, make_timeout(10000));
 }
 
@@ -68,21 +75,31 @@ bool TPWriter::Connect()
 		return false;
 	}
 
-	std::cout << "Connected to Tarantool at " << host << std::endl;
-	next_sync_attempt = 0;
+	int flags = ::fcntl(sess.fd(), F_GETFL);
+	if (::fcntl(sess.fd(), F_SETFL, flags & ~O_NONBLOCK) < 0) {
+		std::cout << "fcntl() -> ~O_NONBLOCK failed, errno: " << errno << std::endl;
+		return false;
+	}
+	flags = 1;
+	if (::setsockopt(sess.fd(), IPPROTO_TCP, TCP_NODELAY, (char*)&flags, sizeof(flags)) < 0) {
+		std::cout << "setsockopt() -> TCP_NODELAY failed, errno: " << errno << std::endl;
+	}
 
+	next_sync_attempt = 0;
+	sent_cnt = 0;
+	sess.net()->errno_ = 0;
+	sess.net()->error = ::TNT_EOK;
+
+	std::cout << "Connected to Tarantool at " << host << std::endl;
 	return true;
 }
 
-TPWriter::~TPWriter()
-{
-	::tnt_stream_free(&sess);
-}
+TPWriter::~TPWriter() {}
 
-void TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos)
+void TPWriter::ReadBinlogPos(std::string& binlog_name, unsigned long& binlog_pos)
 {
 	// read initial binlog pos
-	int64_t sync;
+	__tnt_reply re;
 	{
 		__tnt_object key;
 		::tnt_object_add_array(&key, 1);
@@ -95,15 +112,9 @@ void TPWriter::ReadBinlogPos(std::string &binlog_name, unsigned long &binlog_pos
 		::tnt_request_set_limit(&req, 1);
 		::tnt_request_set_key(&req, &key);
 
-		sync = Send(&req);
+		SendRecvSynced(&req, &re);
 	}
 
-	__tnt_reply re;
-	while (!Recv(&re));
-
-	if ((&re)->sync != sync) {
-		throw std::runtime_error("ReadBinlogPos error: not requested reply");
-	}
 	do {
 		this->binlog_name = binlog_name = "";
 		this->binlog_pos = binlog_pos = 0;
@@ -148,28 +159,13 @@ void TPWriter::Disconnect()
 	::tnt_close(&sess);
 }
 
-void TPWriter::AddTable(
-	const std::string& db,
-	const std::string& table,
-	const unsigned space,
-	const Tuple &keys,
-	const std::string& insert_call,
-	const std::string& update_call,
-	const std::string& delete_call
-) {
-	TableSpace& s = dbs[db][table];
-	s.space = space;
-	s.keys = keys;
-	s.insert_call = insert_call;
-	s.update_call = update_call;
-	s.delete_call = delete_call;
-}
-
 void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 {
 	// spacial case event "IGNORE", which only updates binlog position
 	// but doesn't modify any table data
 	if (ev->event == "IGNORE") {
+		binlog_name = ev->binlog_name;
+		binlog_pos = ev->binlog_pos;
 		return;
 	}
 
@@ -224,7 +220,7 @@ void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 		::tnt_object_add_nil(o);
 	};
 
-	const auto add_value = [&] (struct ::tnt_stream *o, const unsigned index, const SerializableValue &v) -> void {
+	const auto add_value = [&] (struct ::tnt_stream *o, const unsigned index, const SerializableValue& v) -> void {
 		try {
 			if (v.is<std::string>()) {
 				const std::string s = v.as<std::string>();
@@ -257,7 +253,7 @@ void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 				add_nil_with_replace(o, index);
 			}
 		}
-		catch (boost::bad_any_cast &ex) {
+		catch (boost::bad_any_cast& ex) {
 			std::ostringstream s;
 			s << "Typecasting error for column: " << ex.what();
 			throw std::range_error(s.str());
@@ -318,6 +314,7 @@ void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 		::tnt_request_set_func(&req, func_name.c_str(), func_name.length());
 
 		Send(&req);
+		// SendRecvSynced(&req);
 	};
 
 	// add Tarantool request
@@ -332,6 +329,7 @@ void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 			::tnt_request_set_key(&req, &key);
 
 			Send(&req);
+			// SendRecvSynced(&req);
 		} else {
 			make_call(ts.delete_call);
 		}
@@ -358,6 +356,7 @@ void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 			::tnt_request_set_ops(&req, &ops);
 
 			Send(&req);
+			// SendRecvSynced(&req);
 		} else {
 			make_call(ts.insert_call);
 		}
@@ -376,6 +375,7 @@ void TPWriter::BinlogEventCallback(SerializableBinlogEventPtr&& ev)
 			::tnt_request_set_ops(&req, &ops);
 
 			Send(&req);
+			// SendRecvSynced(&req);
 		} else {
 			make_call(ts.update_call);
 		}
@@ -402,13 +402,10 @@ int64_t TPWriter::Send(struct ::tnt_request *req)
 	char *buf = TNT_SBUF_DATA(&sbuf);
 
 	while (len > 0) {
-		const ssize_t sent = sess.write(&sess, buf, len);
+		const ssize_t sent = ::tnt_io_send_raw(sess.net(), buf, len, 1);
 		if (sent < 0) {
-			const int _errno = ::tnt_errno(&sess);
-			if (_errno == EWOULDBLOCK || _errno == EAGAIN) {
-				continue;
-			}
 			::tnt_stream_free(&sbuf);
+
 			std::ostringstream s;
 			s << "Send failed: " << ::tnt_strerror(&sess);
 			throw std::runtime_error(s.str());
@@ -418,6 +415,7 @@ int64_t TPWriter::Send(struct ::tnt_request *req)
 	}
 
 	::tnt_stream_free(&sbuf);
+	++sent_cnt;
 	return sync;
 }
 
@@ -430,7 +428,9 @@ void TPWriter::Sync()
 
 		__tnt_request req;
 		::tnt_request_ping(&req);
+
 		Send(&req);
+		// SendRecvSynced(&req);
 
 		next_ping_attempt = Milliseconds() + TPWriter::PING_TIMEOUT;
 	}
@@ -448,45 +448,42 @@ void TPWriter::Sync()
 		::tnt_request_set_tuple(&req, &tuple);
 
 		Send(&req);
+		// SendRecvSynced(&req);
 
 		next_sync_attempt = Milliseconds() + sync_retry;
 	}
 }
 
-// non-blocking receive
-bool TPWriter::Recv(struct ::tnt_reply *re)
+void TPWriter::Recv(struct ::tnt_reply* re)
 {
-	const int result = sess.read_reply(&sess, re);
-
-	if (result == 0) {
-		if (re->code) {
-			std::ostringstream s;
-			s << "Tarantool error: " << std::string(re->error, re->error_end - re->error) << " (code: " << re->code << ")";
-			throw std::range_error(s.str());
-		}
-		return true;
+	if (sent_cnt <= 0) {
+		throw std::runtime_error("Recv failed: bad sent_cnt");
 	}
-	else if (result < 0) {
-		const int _errno = ::tnt_errno(&sess);
-		if (_errno == EWOULDBLOCK || _errno == EAGAIN) {
-			return false;
-		}
+
+	const static ::tnt_reply_t recv_cb = [] (void* s, char* buf, long size) -> long {
+		return ::tnt_io_recv_raw(TNT_SNET_CAST((::tnt_stream*)s), buf, size, 1);
+	};
+
+	if (::tnt_reply_from(re, recv_cb, &sess) < 0) {
 		std::ostringstream s;
-		s << "Recv failed: " << ::tnt_strerror(&sess);
+		s << "Recv failed: " << (::tnt_errno(&sess) ? ::tnt_strerror(&sess) : "tnt_reply_from()");
 		throw std::runtime_error(s.str());
 	}
-	// no complete replies in buffer
-	return false;
+	if (re->code) {
+		std::ostringstream s;
+		s << "Tarantool error: " << std::string(re->error, re->error_end - re->error) << " (code: " << re->code << ")";
+		throw std::range_error(s.str());
+	}
+
+	--sent_cnt;
 }
 
 void TPWriter::RecvAll()
 {
-	bool result;
-	do {
+	while (sent_cnt > 0) {
 		__tnt_reply re;
-		result = Recv(&re);
+		Recv(&re);
 	}
-	while (result);
 }
 
 }

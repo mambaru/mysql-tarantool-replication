@@ -14,17 +14,23 @@ class SerializableValue {
 		boost::any value;
 
 	public:
-		SerializableValue () {}
-		SerializableValue (const boost::any &value_) : value(value_) {}
-
 		template<typename T>
-		inline SerializableValue& operator= (T value_) {
+		inline SerializableValue& operator= (const T& value_) {
 			value = boost::any(value_);
+			return *this;
+		}
+		template<typename T>
+		inline SerializableValue& operator= (T&& value_) {
+			value = boost::any(std::forward<T>(value_));
 			return *this;
 		}
 
 		inline SerializableValue& operator= (const boost::any& value_) {
 			value = value_;
+			return *this;
+		}
+		inline SerializableValue& operator= (boost::any&& value_) {
+			value = std::forward<boost::any>(value_);
 			return *this;
 		}
 
@@ -76,7 +82,7 @@ struct SerializableBinlogEvent
 	std::string binlog_name;
 	unsigned long binlog_pos;
 	// unsigned long seconds_behind_master;
-	unsigned long unix_timestamp;
+	// unsigned long unix_timestamp;
 	std::string database;
 	std::string table;
 	std::string event;

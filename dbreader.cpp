@@ -6,23 +6,9 @@ using std::placeholders::_1;
 
 namespace replicator {
 
-DBReader::DBReader(nanomysql::mysql_conn_opts &opts, unsigned connect_retry)
-	: state(), slave(slave::MasterInfo(opts, connect_retry), state), stopped(false), last_event_when(0) {}
-
-DBReader::~DBReader()
+void DBReader::DumpTables(std::string& binlog_name, unsigned long& binlog_pos, const BinlogEventCallback& cb)
 {
-	slave.close_connection();
-}
-
-void DBReader::AddTable(const std::string& db, const std::string& table, std::map<std::string, unsigned>& filter, bool do_dump)
-{
-	tables.emplace_back(db, table, filter, do_dump);
-}
-
-void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, BinlogEventCallback cb)
-{
-	slave::callback dummycallback = std::bind(&DBReader::DummyEventCallback, this, _1);
-
+	const static slave::callback dummycallback = [] (const slave::RecordSet& event) {};
 	// start temp slave to read DB structure
 	slave::Slave tempslave(slave.masterInfo(), state);
 	for (auto i = tables.begin(), end = tables.end(); i != end; ++i) {
@@ -32,7 +18,7 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 	tempslave.init();
 	tempslave.createDatabaseStructure();
 
-	last_event_when = ::time(NULL);
+	// last_event_when = ::time(NULL);
 
 	slave::Slave::binlog_pos_t bp = tempslave.getLastBinlog();
 	binlog_name = bp.first;
@@ -42,12 +28,9 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 
 	// dump tables
 	nanomysql::Connection conn(slave.masterInfo().conn_options);
-
 	conn.query("SET NAMES utf8");
 
 	for (auto table = tables.begin(), end = tables.end(); !stopped && table != end; ++table) {
-		if (!table->do_dump) continue;
-
 		// build field_name -> field_ptr map for filtered columns
 		std::vector<std::pair<unsigned, slave::PtrField>> filter_;
 		const auto rtable = tempslave.getRli().getTable(table->name);
@@ -56,7 +39,7 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 		for (const auto ptr_field : rtable->fields) {
 			const auto it = table->filter.find(ptr_field->field_name);
 			if (it != table->filter.end()) {
-				filter_.emplace_back(it->second, ptr_field);
+				filter_.emplace_back(it->second.first, ptr_field);
 				s_fields += ptr_field->field_name;
 				s_fields += ',';
 			}
@@ -71,7 +54,7 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 			std::cref(table->name.second),
 			std::cref(filter_),
 			_1,
-			cb
+			std::cref(cb)
 		));
 	}
 
@@ -81,7 +64,7 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 		ev->binlog_name = binlog_name;
 		ev->binlog_pos = binlog_pos;
 		// ev->seconds_behind_master = GetSecondsBehindMaster();
-		ev->unix_timestamp = long(time(NULL));
+		// ev->unix_timestamp = long(time(NULL));
 		ev->event = "IGNORE";
 		stopped = cb(std::move(ev));
 	}
@@ -89,7 +72,7 @@ void DBReader::DumpTables(std::string &binlog_name, unsigned long &binlog_pos, B
 	//tempslave.close_connection();
 }
 
-void DBReader::ReadBinlog(const std::string &binlog_name, unsigned long binlog_pos, BinlogEventCallback cb)
+void DBReader::ReadBinlog(const std::string& binlog_name, unsigned long binlog_pos, const BinlogEventCallback& cb)
 {
 	stopped = false;
 	state.setMasterLogNamePos(binlog_name, binlog_pos);
@@ -98,10 +81,15 @@ void DBReader::ReadBinlog(const std::string &binlog_name, unsigned long binlog_p
 		slave.setCallback(
 			table->name.first,
 			table->name.second,
-			std::bind(&DBReader::EventCallback, this, _1, std::cref(table->filter), cb)
+			std::bind(
+				table->is_primary
+					? &DBReader::EventCallbackNormal
+					: &DBReader::EventCallbackNullify,
+				this, _1, std::cref(table->filter), std::cref(cb)
+			)
 		);
 	}
-	slave.setXidCallback(std::bind(&DBReader::XidEventCallback, this, _1, cb));
+	slave.setXidCallback(std::bind(&DBReader::XidEventCallback, this, _1, std::cref(cb)));
 	slave.init();
 	slave.createDatabaseStructure();
 
@@ -114,54 +102,98 @@ void DBReader::Stop()
 	slave.close_connection();
 }
 
-void DBReader::EventCallback(const slave::RecordSet& event, const std::map<std::string, unsigned>& filter, BinlogEventCallback cb)
-{
-	last_event_when = event.when;
+void DBReader::EventCallbackNormal(
+	const slave::RecordSet& event,
+	const std::map<std::string, std::pair<unsigned, bool>>& filter,
+	const BinlogEventCallback& cb
+) {
+	if (stopped) return;
+	// last_event_when = event.when;
 
 	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
-	ev->binlog_name = state.getMasterLogName();
-	ev->binlog_pos = state.getMasterLogPos();
-	// ev->seconds_behind_master = GetSecondsBehindMaster();
-	ev->unix_timestamp = long(time(NULL));
-	ev->database = event.db_name;
-	ev->table = event.tbl_name;
 
 	switch (event.type_event) {
 		case slave::RecordSet::Delete: ev->event = "DELETE"; break;
 		case slave::RecordSet::Update: ev->event = "UPDATE"; break;
 		case slave::RecordSet::Write:  ev->event = "INSERT"; break;
-		default:                       ev->event = "IGNORE";
+		default: return;
 	}
+
+	ev->binlog_name = state.getMasterLogName();
+	ev->binlog_pos = state.getMasterLogPos();
+	// ev->seconds_behind_master = GetSecondsBehindMaster();
+	// ev->unix_timestamp = long(time(NULL));
+	ev->database = event.db_name;
+	ev->table = event.tbl_name;
+
 	for (auto fi = filter.begin(), end = filter.end(); fi != end; ++fi) {
 		const auto ri = event.m_row.find(fi->first);
 		if (ri != event.m_row.end()) {
-			ev->row[ fi->second ] = ri->second;
+			ev->row[ fi->second.first ] = ri->second;
 		}
 	}
 	stopped = cb(std::move(ev));
 }
 
-void DBReader::XidEventCallback(unsigned int server_id, BinlogEventCallback cb)
+void DBReader::EventCallbackNullify(
+	const slave::RecordSet& event,
+	const std::map<std::string, std::pair<unsigned, bool>>& filter,
+	const BinlogEventCallback& cb
+) {
+	if (stopped) return;
+	// last_event_when = event.when;
+
+	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
+	bool is_delete = false;
+
+	switch (event.type_event) {
+		case slave::RecordSet::Delete: ev->event = "DELETE"; is_delete = true;
+		case slave::RecordSet::Update: ev->event = "UPDATE"; break;
+		case slave::RecordSet::Write:  ev->event = "INSERT"; break;
+		default: return;
+	}
+
+	ev->binlog_name = state.getMasterLogName();
+	ev->binlog_pos = state.getMasterLogPos();
+	// ev->seconds_behind_master = GetSecondsBehindMaster();
+	// ev->unix_timestamp = long(time(NULL));
+	ev->database = event.db_name;
+	ev->table = event.tbl_name;
+
+	for (auto fi = filter.begin(), end = filter.end(); fi != end; ++fi) {
+		const auto ri = event.m_row.find(fi->first);
+		if (ri != event.m_row.end()) {
+			// if it's not a key and event is delete - don't actually delete, just nullify
+			ev->row[ fi->second.first ] = !fi->second.second && is_delete ? boost::any() : ri->second;
+		}
+	}
+	stopped = cb(std::move(ev));
+}
+
+void DBReader::XidEventCallback(unsigned int server_id, const BinlogEventCallback& cb)
 {
-	last_event_when = ::time(NULL);
+	if (stopped) return;
+	// last_event_when = ::time(NULL);
 
 	// send binlog position update event
 	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
 	ev->binlog_name = state.getMasterLogName();
 	ev->binlog_pos = state.getMasterLogPos();
 	// ev->seconds_behind_master = GetSecondsBehindMaster();
-	ev->unix_timestamp = long(time(NULL));
+	// ev->unix_timestamp = long(time(NULL));
 	ev->event = "IGNORE";
 	stopped = cb(std::move(ev));
 }
 
 void DBReader::DumpTablesCallback(
-	const std::string &db_name,
-	const std::string &tbl_name,
+	const std::string& db_name,
+	const std::string& tbl_name,
 	const std::vector<std::pair<unsigned, slave::PtrField>>& filter,
 	const nanomysql::fields_t& fields,
-	BinlogEventCallback cb
+	const BinlogEventCallback& cb
 ) {
+	if (stopped) return;
+
 	SerializableBinlogEventPtr ev(new SerializableBinlogEvent);
 	ev->binlog_name = "";
 	ev->binlog_pos = 0;
@@ -169,7 +201,7 @@ void DBReader::DumpTablesCallback(
 	ev->table = tbl_name;
 	ev->event = "INSERT";
 	// ev->seconds_behind_master = GetSecondsBehindMaster();
-	ev->unix_timestamp = long(time(NULL));
+	// ev->unix_timestamp = long(time(NULL));
 
 	for (const auto& it : filter) {
 		slave::PtrField ptr_field = it.second;
@@ -181,13 +213,11 @@ void DBReader::DumpTablesCallback(
 			ev->row[ it.first ] = ptr_field->field_data;
 		}
 	}
-	if (!stopped) {
-		stopped = cb(std::move(ev));
-	}
+	stopped = cb(std::move(ev));
 }
 
-unsigned DBReader::GetSecondsBehindMaster() const {
-	return std::max(::time(NULL) - last_event_when, 0L);
-}
+// unsigned DBReader::GetSecondsBehindMaster() const {
+// 	return std::max(::time(NULL) - last_event_when, 0L);
+// }
 
 } // replicator

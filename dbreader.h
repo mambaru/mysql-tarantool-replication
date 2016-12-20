@@ -18,40 +18,63 @@ typedef std::function<bool (SerializableBinlogEventPtr&&)> BinlogEventCallback;
 
 struct DBTable
 {
-	DBTable() {}
+	DBTable(
+		const std::string& db,
+		const std::string& table,
+		const std::map<std::string, std::pair<unsigned, bool>>& filter_,
+		bool is_primary_
+	) :
+		name(db, table), filter(filter_), is_primary(is_primary_)
+	{}
 
-	DBTable(const std::string& db, const std::string& table, std::map<std::string, unsigned>& filter, bool do_dump_)
-		: name(db, table), filter(filter), do_dump(do_dump_) {}
-
-	std::pair<std::string, std::string> name;
-	std::map<std::string, unsigned> filter;
-	bool do_dump;
+	const std::pair<std::string, std::string> name;
+	const std::map<std::string, std::pair<unsigned, bool>> filter;
+	const bool is_primary;
 };
 
 class DBReader
 {
 public:
-	DBReader (nanomysql::mysql_conn_opts &opts, unsigned int connect_retry = 60);
-	~DBReader();
+	DBReader(nanomysql::mysql_conn_opts& opts, unsigned connect_retry)
+		: state(), slave(slave::MasterInfo(opts, connect_retry), state), stopped(false) {}
 
-	void AddTable(const std::string &db, const std::string &table, std::map<std::string, unsigned>& filter, bool do_dump);
-	void DumpTables(std::string &binlog_name, unsigned long &binlog_pos, BinlogEventCallback f);
-	void ReadBinlog(const std::string &binlog_name, unsigned long binlog_pos, BinlogEventCallback cb);
+	~DBReader() {
+		slave.close_connection();
+	}
+
+	void AddTable(
+		const std::string& db,
+		const std::string& table,
+		const std::map<std::string, std::pair<unsigned, bool>>& filter,
+		bool is_primary
+	) {
+		tables.emplace_back(db, table, filter, is_primary);
+	}
+
+	void DumpTables(std::string& binlog_name, unsigned long& binlog_pos, const BinlogEventCallback& cb);
+	void ReadBinlog(const std::string& binlog_name, unsigned long binlog_pos, const BinlogEventCallback& cb);
 	void Stop();
 
-	void EventCallback(const slave::RecordSet& event, const std::map<std::string, unsigned>& filter, BinlogEventCallback cb);
-	void DummyEventCallback(const slave::RecordSet& event) {};
-
-	void XidEventCallback(unsigned int server_id, BinlogEventCallback cb);
+	void EventCallbackNormal(
+		const slave::RecordSet& event,
+		const std::map<std::string, std::pair<unsigned, bool>>& filter,
+		const BinlogEventCallback& cb
+	);
+	void EventCallbackNullify(
+		const slave::RecordSet& event,
+		const std::map<std::string, std::pair<unsigned, bool>>& filter,
+		const BinlogEventCallback& cb
+	);
+	void XidEventCallback(unsigned int server_id, const BinlogEventCallback& cb);
 	void DumpTablesCallback(
-		const std::string &db_name,
-		const std::string &tbl_name,
+		const std::string& db_name,
+		const std::string& tbl_name,
 		const std::vector<std::pair<unsigned, slave::PtrField>>& filter,
-		const nanomysql::fields_t &f,
-		BinlogEventCallback cb
+		const nanomysql::fields_t& f,
+		const BinlogEventCallback& cb
 	);
 
-	unsigned GetSecondsBehindMaster() const;
+	// unsigned GetSecondsBehindMaster() const;
 
 private:
 	slave::DefaultExtState state;
@@ -59,7 +82,7 @@ private:
 	std::vector<DBTable> tables;
 	bool stopped;
 
-	::time_t last_event_when;
+	// ::time_t last_event_when;
 };
 
 } // replicator

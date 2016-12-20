@@ -140,6 +140,7 @@ static void init(YAML::Node& cfg)
 		}
 		// read Mysql to Tarantool mappings (each table maps to a single Tarantool space)
 		{
+			std::map<unsigned, bool> has_primary;
 			const YAML::Node& mappings = cfg["mappings"];
 
 			for (int i = 0; i < mappings.size(); i++) {
@@ -153,9 +154,16 @@ static void init(YAML::Node& cfg)
 				std::string delete_call = mapping["delete_call"] ? mapping["delete_call"].as<std::string>() : TPWriter::empty_call;
 
 				const unsigned space = mapping["space"].as<unsigned>();
-				std::map<std::string, unsigned> columns;
-				TPWriter::Tuple keys;
+				std::map<std::string, std::pair<unsigned, bool>> columns;
+				std::vector<unsigned> keys;
 				unsigned index_max = tpwriter->space_last_id[space];
+
+				bool is_primary;
+				if (has_primary.find(space) == has_primary.end()) {
+					is_primary = has_primary[space] = true;;
+				} else {
+					is_primary = false;
+				}
 
 				// read key tarantool fields we'll use for delete requests
 				{
@@ -170,12 +178,18 @@ static void init(YAML::Node& cfg)
 				{
 					const YAML::Node& columns_ = mapping["columns"];
 					for (int i = 0; i < columns_.size(); i++) {
-						unsigned index = i < keys.size() ? keys[i] : ++index_max;
-						columns[ columns_[i].as<std::string>() ] = index;
+						const bool is_key = i < keys.size();
+						const unsigned index = is_key ? keys[i] : ++index_max;
+						columns.emplace(
+							std::piecewise_construct,
+							std::forward_as_tuple(columns_[i].as<std::string>()),
+							std::forward_as_tuple(index, is_key)
+						);
 					}
 				}
 
-				dbreader->AddTable(database, table, columns, mapping["dump"].as<bool>());
+				dbreader->AddTable(database, table, columns, is_primary);
+				std::sort(keys.begin(), keys.end());
 				tpwriter->AddTable(database, table, space, keys, insert_call, update_call, delete_call);
 				tpwriter->space_last_id[space] = index_max;
 			}
@@ -194,7 +208,7 @@ static void init(YAML::Node& cfg)
 					auto itf = field.begin();
 					if (itf == field.end()) continue;
 
-					unsigned index = itrn->first.as<unsigned>();
+					const unsigned index = itrn->first.as<unsigned>();
 					std::string type = itf->first.as<std::string>();
 					const YAML::Node& value = itf->second;
 

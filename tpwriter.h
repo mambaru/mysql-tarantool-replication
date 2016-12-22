@@ -16,8 +16,6 @@ class TPWriter
 	public:
 		TPWriter(
 			const std::string& host,
-			const std::string& user,
-			const std::string& password,
 			const uint32_t binlog_key_space,
 			const unsigned binlog_key,
 			const unsigned connect_retry,
@@ -84,8 +82,6 @@ class TPWriter
 		};
 
 		const std::string host;
-		const std::string user;
-		const std::string password;
 		const uint32_t binlog_key_space;
 		const unsigned binlog_key;
 		const unsigned connect_retry;

@@ -147,7 +147,7 @@ void DBReader::EventCallbackNullify(
 	bool is_delete = false;
 
 	switch (event.type_event) {
-		case slave::RecordSet::Delete: ev->event = "DELETE"; is_delete = true;
+		case slave::RecordSet::Delete: is_delete = true;
 		case slave::RecordSet::Update: ev->event = "UPDATE"; break;
 		case slave::RecordSet::Write:  ev->event = "INSERT"; break;
 		default: return;

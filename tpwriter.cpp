@@ -27,16 +27,12 @@ const std::string TPWriter::empty_call("");
 
 TPWriter::TPWriter(
 	const std::string& host_,
-	const std::string& user_,
-	const std::string& password_,
 	const uint32_t binlog_key_space_,
 	const unsigned binlog_key_,
 	const unsigned connect_retry_,
 	const unsigned sync_retry_
 ) :
 	host(host_),
-	user(user_),
-	password(password_),
 	binlog_key_space(binlog_key_space_),
 	binlog_key(binlog_key_),
 	connect_retry(connect_retry_),

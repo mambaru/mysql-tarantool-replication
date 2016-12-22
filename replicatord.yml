@@ -7,8 +7,6 @@ mysql:
 
 tarantool:
     host: 10.5.4.248:5000
-    user: ""
-    password: ""
     binlog_pos_space: 512
     binlog_pos_key: 0
     connect_retry: 15 # seconds

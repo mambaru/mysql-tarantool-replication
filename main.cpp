@@ -130,8 +130,6 @@ static void init(YAML::Node& cfg)
 
 			tpwriter = new TPWriter(
 				tarantool["host"].as<std::string>(),
-				tarantool["user"].as<std::string>(),
-				tarantool["password"].as<std::string>(),
 				tarantool["binlog_pos_space"].as<unsigned>(),
 				tarantool["binlog_pos_key"].as<unsigned>(),
 				tarantool["connect_retry"].as<unsigned>(),

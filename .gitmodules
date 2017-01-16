@@ -4,7 +4,7 @@
 	branch = fix_request_writeout
 [submodule "lib/libslave"]
 	path = lib/libslave
-	url = git@gitlab7.lan:cpp/libslave.git
+	url = https://github.com/mambaru/libslave.git
 	branch = mamba
 [submodule "lib/yaml-cpp"]
 	path = lib/yaml-cpp

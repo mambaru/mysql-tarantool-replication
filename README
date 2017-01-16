@@ -1,3 +1,3 @@
 Демон репликации из MySQL в Tarantool.
-
+Использует https://github.com/mambaru/libslave/tree/mamba 
 . ./build.sh
